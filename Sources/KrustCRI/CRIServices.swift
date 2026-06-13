@@ -1,0 +1,618 @@
+import Foundation
+import GRPCCore
+import Logging
+import SwiftProtobuf
+
+struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
+    let runtimeName: String
+    let runtimeVersion: String
+    let state: RuntimeState
+    let runtime: ContainerRuntimeBackend
+    let backendName: String
+    let logger: Logger
+
+    func version(
+        request: Runtime_V1_VersionRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_VersionResponse {
+        .with {
+            $0.version = request.version.isEmpty ? "0.1.0" : request.version
+            $0.runtimeName = runtimeName
+            $0.runtimeVersion = runtimeVersion
+            $0.runtimeApiVersion = "0.1.0"
+        }
+    }
+
+    func runPodSandbox(
+        request: Runtime_V1_RunPodSandboxRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_RunPodSandboxResponse {
+        let config = request.config
+        let meta = config.metadata
+        let id = makeID(prefix: "pod", seed: "\(meta.namespace)-\(meta.name)-\(meta.uid)-\(meta.attempt)")
+        let record = SandboxRecord(
+            id: id,
+            name: meta.name,
+            namespace: meta.namespace,
+            attempt: meta.attempt,
+            uid: meta.uid,
+            labels: config.labels,
+            annotations: config.annotations,
+            runtimeHandler: request.runtimeHandler,
+            createdAt: nowNanos(),
+            phase: .ready,
+            ip: "10.88.0.\((abs(id.hashValue) % 200) + 2)"
+        )
+        do {
+            try await runtime.runSandbox(record)
+            try await state.addSandbox(record)
+        } catch {
+            logger.error("RunPodSandbox failed", metadata: ["sandbox": "\(id)", "error": "\(error)"])
+            throw RPCError(code: .unknown, message: "RunPodSandbox failed: \(error)")
+        }
+        return .with { $0.podSandboxID = id }
+    }
+
+    func stopPodSandbox(
+        request: Runtime_V1_StopPodSandboxRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_StopPodSandboxResponse {
+        if let sandbox = await state.sandbox(id: request.podSandboxID) {
+            for container in await state.containers(sandboxID: sandbox.id) where container.phase == .running {
+                try await runtime.stopContainer(container, sandbox: sandbox)
+                try await state.updateContainer(id: container.id) {
+                    $0.phase = .exited
+                    $0.finishedAt = nowNanos()
+                }
+            }
+            try await runtime.stopSandbox(sandbox)
+            try await state.updateSandbox(id: sandbox.id) { $0.phase = .notReady }
+        }
+        return Runtime_V1_StopPodSandboxResponse()
+    }
+
+    func removePodSandbox(
+        request: Runtime_V1_RemovePodSandboxRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_RemovePodSandboxResponse {
+        try await state.removeSandbox(id: request.podSandboxID)
+        return Runtime_V1_RemovePodSandboxResponse()
+    }
+
+    func podSandboxStatus(
+        request: Runtime_V1_PodSandboxStatusRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_PodSandboxStatusResponse {
+        guard let sandbox = await state.sandbox(id: request.podSandboxID) else {
+            throw RPCError(code: .notFound, message: "sandbox not found: \(request.podSandboxID)")
+        }
+        let containers = await state.containers(sandboxID: sandbox.id)
+        return .with {
+            $0.status = sandbox.toStatus()
+            $0.containersStatuses = containers.map { $0.toStatus() }
+            $0.timestamp = nowNanos()
+            if request.verbose {
+                $0.info = ["backend": "\"\(backendName)\""]
+            }
+        }
+    }
+
+    func listPodSandbox(
+        request: Runtime_V1_ListPodSandboxRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListPodSandboxResponse {
+        let items = (await state.sandboxes())
+            .filter { request.filter.matches($0) }
+            .map { $0.toListItem() }
+        return .with {
+            $0.items = items
+        }
+    }
+
+    func streamPodSandboxes(
+        request: Runtime_V1_StreamPodSandboxesRequest,
+        response: RPCWriter<Runtime_V1_StreamPodSandboxesResponse>,
+        context: ServerContext
+    ) async throws {
+        let items = (await state.sandboxes()).filter { request.filter.matches($0) }.map { $0.toListItem() }
+        if !items.isEmpty {
+            try await response.write(.with { $0.podSandboxes = items })
+        }
+    }
+
+    func createContainer(
+        request: Runtime_V1_CreateContainerRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_CreateContainerResponse {
+        guard let sandbox = await state.sandbox(id: request.podSandboxID) else {
+            throw RPCError(code: .notFound, message: "sandbox not found: \(request.podSandboxID)")
+        }
+        let config = request.config
+        let meta = config.metadata
+        let imageRef = imageName(config.image)
+        let image = try await state.upsertImage(reference: imageRef)
+        let id = makeID(prefix: "ctr", seed: "\(request.podSandboxID)-\(meta.name)-\(meta.attempt)")
+        let record = ContainerRecord(
+            id: id,
+            sandboxID: request.podSandboxID,
+            name: meta.name,
+            attempt: meta.attempt,
+            image: imageRef,
+            imageRef: image.id,
+            command: config.command,
+            args: config.args,
+            labels: config.labels,
+            annotations: config.annotations,
+            logPath: config.logPath,
+            createdAt: nowNanos(),
+            startedAt: 0,
+            finishedAt: 0,
+            exitCode: 0,
+            phase: .created
+        )
+        do {
+            try await runtime.createContainer(record, sandbox: sandbox)
+            try await state.addContainer(record)
+        } catch {
+            logger.error("CreateContainer failed", metadata: ["container": "\(id)", "sandbox": "\(sandbox.id)", "image": "\(imageRef)", "error": "\(error)"])
+            throw RPCError(code: .unknown, message: "CreateContainer failed: \(error)")
+        }
+        return .with { $0.containerID = id }
+    }
+
+    func startContainer(
+        request: Runtime_V1_StartContainerRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_StartContainerResponse {
+        guard let container = await state.container(id: request.containerID) else {
+            throw RPCError(code: .notFound, message: "container not found: \(request.containerID)")
+        }
+        guard let sandbox = await state.sandbox(id: container.sandboxID) else {
+            throw RPCError(code: .notFound, message: "sandbox not found: \(container.sandboxID)")
+        }
+        try await runtime.startContainer(container, sandbox: sandbox)
+        try await state.updateContainer(id: container.id) {
+            $0.phase = .running
+            $0.startedAt = nowNanos()
+            $0.finishedAt = 0
+        }
+        return Runtime_V1_StartContainerResponse()
+    }
+
+    func stopContainer(
+        request: Runtime_V1_StopContainerRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_StopContainerResponse {
+        if let container = await state.container(id: request.containerID) {
+            try await runtime.stopContainer(container, sandbox: await state.sandbox(id: container.sandboxID))
+            try await state.updateContainer(id: container.id) {
+                $0.phase = .exited
+                $0.finishedAt = nowNanos()
+                $0.exitCode = 0
+            }
+        }
+        return Runtime_V1_StopContainerResponse()
+    }
+
+    func removeContainer(
+        request: Runtime_V1_RemoveContainerRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_RemoveContainerResponse {
+        if let container = await state.container(id: request.containerID) {
+            try await runtime.removeContainer(container)
+        }
+        try await state.removeContainer(id: request.containerID)
+        return Runtime_V1_RemoveContainerResponse()
+    }
+
+    func listContainers(
+        request: Runtime_V1_ListContainersRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListContainersResponse {
+        let containers = (await state.containers())
+            .filter { request.filter.matches($0) }
+            .map { $0.toListItem() }
+        return .with {
+            $0.containers = containers
+        }
+    }
+
+    func streamContainers(
+        request: Runtime_V1_StreamContainersRequest,
+        response: RPCWriter<Runtime_V1_StreamContainersResponse>,
+        context: ServerContext
+    ) async throws {
+        let containers = (await state.containers()).filter { request.filter.matches($0) }.map { $0.toListItem() }
+        if !containers.isEmpty {
+            try await response.write(.with { $0.containers = containers })
+        }
+    }
+
+    func containerStatus(
+        request: Runtime_V1_ContainerStatusRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ContainerStatusResponse {
+        guard let container = await state.container(id: request.containerID) else {
+            throw RPCError(code: .notFound, message: "container not found: \(request.containerID)")
+        }
+        return .with {
+            $0.status = container.toStatus()
+            if request.verbose {
+                $0.info = ["backend": "\"\(backendName)\""]
+            }
+        }
+    }
+
+    func updateContainerResources(
+        request: Runtime_V1_UpdateContainerResourcesRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_UpdateContainerResourcesResponse {
+        Runtime_V1_UpdateContainerResourcesResponse()
+    }
+
+    func reopenContainerLog(
+        request: Runtime_V1_ReopenContainerLogRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ReopenContainerLogResponse {
+        Runtime_V1_ReopenContainerLogResponse()
+    }
+
+    func execSync(request: Runtime_V1_ExecSyncRequest, context: ServerContext) async throws -> Runtime_V1_ExecSyncResponse {
+        throw unimplemented("ExecSync")
+    }
+
+    func exec(request: Runtime_V1_ExecRequest, context: ServerContext) async throws -> Runtime_V1_ExecResponse {
+        throw unimplemented("Exec")
+    }
+
+    func attach(request: Runtime_V1_AttachRequest, context: ServerContext) async throws -> Runtime_V1_AttachResponse {
+        throw unimplemented("Attach")
+    }
+
+    func portForward(request: Runtime_V1_PortForwardRequest, context: ServerContext) async throws -> Runtime_V1_PortForwardResponse {
+        throw unimplemented("PortForward")
+    }
+
+    func containerStats(
+        request: Runtime_V1_ContainerStatsRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ContainerStatsResponse {
+        guard let container = await state.container(id: request.containerID) else {
+            throw RPCError(code: .notFound, message: "container not found: \(request.containerID)")
+        }
+        return .with { $0.stats = container.toStats() }
+    }
+
+    func listContainerStats(
+        request: Runtime_V1_ListContainerStatsRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListContainerStatsResponse {
+        let stats = (await state.containers()).map { $0.toStats() }
+        return .with { $0.stats = stats }
+    }
+
+    func streamContainerStats(
+        request: Runtime_V1_StreamContainerStatsRequest,
+        response: RPCWriter<Runtime_V1_StreamContainerStatsResponse>,
+        context: ServerContext
+    ) async throws {
+        let stats = (await state.containers()).map { $0.toStats() }
+        if !stats.isEmpty {
+            try await response.write(.with { $0.containerStats = stats })
+        }
+    }
+
+    func podSandboxStats(
+        request: Runtime_V1_PodSandboxStatsRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_PodSandboxStatsResponse {
+        Runtime_V1_PodSandboxStatsResponse()
+    }
+
+    func listPodSandboxStats(
+        request: Runtime_V1_ListPodSandboxStatsRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListPodSandboxStatsResponse {
+        Runtime_V1_ListPodSandboxStatsResponse()
+    }
+
+    func streamPodSandboxStats(
+        request: Runtime_V1_StreamPodSandboxStatsRequest,
+        response: RPCWriter<Runtime_V1_StreamPodSandboxStatsResponse>,
+        context: ServerContext
+    ) async throws {}
+
+    func updateRuntimeConfig(
+        request: Runtime_V1_UpdateRuntimeConfigRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
+        Runtime_V1_UpdateRuntimeConfigResponse()
+    }
+
+    func status(
+        request: Runtime_V1_StatusRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_StatusResponse {
+        let backendStatus = await runtime.status()
+        return .with {
+            $0.status = .with {
+                $0.conditions = [
+                    .with { $0.type = "RuntimeReady"; $0.status = backendStatus.runtimeReady },
+                    .with { $0.type = "NetworkReady"; $0.status = backendStatus.networkReady },
+                ]
+            }
+            $0.runtimeHandlers = [.with { $0.name = "" }]
+            if request.verbose {
+                var info = [
+                    "backend": "\"\(backendName)\"",
+                    "appleContainerization": "\"\(backendName == "containerization" ? "linuxpod" : "adapter-next")\"",
+                ]
+                for (key, value) in backendStatus.info {
+                    info[key] = "\"\(value)\""
+                }
+                $0.info = info
+            }
+        }
+    }
+
+    func checkpointContainer(
+        request: Runtime_V1_CheckpointContainerRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_CheckpointContainerResponse {
+        throw unimplemented("CheckpointContainer")
+    }
+
+    func getContainerEvents(
+        request: Runtime_V1_GetEventsRequest,
+        response: RPCWriter<Runtime_V1_ContainerEventResponse>,
+        context: ServerContext
+    ) async throws {
+        throw unimplemented("GetContainerEvents")
+    }
+
+    func listMetricDescriptors(
+        request: Runtime_V1_ListMetricDescriptorsRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListMetricDescriptorsResponse {
+        Runtime_V1_ListMetricDescriptorsResponse()
+    }
+
+    func listPodSandboxMetrics(
+        request: Runtime_V1_ListPodSandboxMetricsRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListPodSandboxMetricsResponse {
+        Runtime_V1_ListPodSandboxMetricsResponse()
+    }
+
+    func streamPodSandboxMetrics(
+        request: Runtime_V1_StreamPodSandboxMetricsRequest,
+        response: RPCWriter<Runtime_V1_StreamPodSandboxMetricsResponse>,
+        context: ServerContext
+    ) async throws {}
+
+    func runtimeConfig(
+        request: Runtime_V1_RuntimeConfigRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_RuntimeConfigResponse {
+        Runtime_V1_RuntimeConfigResponse()
+    }
+
+    func updatePodSandboxResources(
+        request: Runtime_V1_UpdatePodSandboxResourcesRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_UpdatePodSandboxResourcesResponse {
+        Runtime_V1_UpdatePodSandboxResourcesResponse()
+    }
+}
+
+struct CRIImageService: Runtime_V1_ImageService.SimpleServiceProtocol {
+    let state: RuntimeState
+    let backendName: String
+    let logger: Logger
+
+    func listImages(
+        request: Runtime_V1_ListImagesRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ListImagesResponse {
+        let images = (await state.images()).map { $0.toCRI() }
+        return .with { $0.images = images }
+    }
+
+    func streamImages(
+        request: Runtime_V1_StreamImagesRequest,
+        response: RPCWriter<Runtime_V1_StreamImagesResponse>,
+        context: ServerContext
+    ) async throws {
+        let images = (await state.images()).map { $0.toCRI() }
+        if !images.isEmpty {
+            try await response.write(.with { $0.images = images })
+        }
+    }
+
+    func imageStatus(
+        request: Runtime_V1_ImageStatusRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ImageStatusResponse {
+        guard let image = await state.image(reference: imageName(request.image)) else {
+            return Runtime_V1_ImageStatusResponse()
+        }
+        return .with {
+            $0.image = image.toCRI()
+            if request.verbose {
+                $0.info = ["backend": "\"\(backendName)\""]
+            }
+        }
+    }
+
+    func pullImage(
+        request: Runtime_V1_PullImageRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_PullImageResponse {
+        let image = try await state.upsertImage(reference: imageName(request.image))
+        return .with { $0.imageRef = image.id }
+    }
+
+    func removeImage(
+        request: Runtime_V1_RemoveImageRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_RemoveImageResponse {
+        try await state.removeImage(reference: imageName(request.image))
+        return Runtime_V1_RemoveImageResponse()
+    }
+
+    func imageFsInfo(
+        request: Runtime_V1_ImageFsInfoRequest,
+        context: ServerContext
+    ) async throws -> Runtime_V1_ImageFsInfoResponse {
+        Runtime_V1_ImageFsInfoResponse()
+    }
+}
+
+private func unimplemented(_ method: String) -> RPCError {
+    RPCError(code: .unimplemented, message: "\(method) is not implemented in the MVP")
+}
+
+private func imageName(_ spec: Runtime_V1_ImageSpec) -> String {
+    if !spec.image.isEmpty { return spec.image }
+    if !spec.userSpecifiedImage.isEmpty { return spec.userSpecifiedImage }
+    if !spec.imageRef.isEmpty { return spec.imageRef }
+    return "unknown:latest"
+}
+
+extension SandboxRecord {
+    func toMetadata() -> Runtime_V1_PodSandboxMetadata {
+        .with {
+            $0.name = name
+            $0.namespace = namespace
+            $0.uid = uid
+            $0.attempt = attempt
+        }
+    }
+
+    func toListItem() -> Runtime_V1_PodSandbox {
+        .with {
+            $0.id = id
+            $0.metadata = toMetadata()
+            $0.state = phase == .ready ? .sandboxReady : .sandboxNotready
+            $0.createdAt = createdAt
+            $0.labels = labels
+            $0.annotations = annotations
+            $0.runtimeHandler = runtimeHandler
+        }
+    }
+
+    func toStatus() -> Runtime_V1_PodSandboxStatus {
+        .with {
+            $0.id = id
+            $0.metadata = toMetadata()
+            $0.state = phase == .ready ? .sandboxReady : .sandboxNotready
+            $0.createdAt = createdAt
+            $0.labels = labels
+            $0.annotations = annotations
+            $0.runtimeHandler = runtimeHandler
+            $0.network = .with { $0.ip = ip }
+        }
+    }
+}
+
+extension ContainerRecord {
+    func toMetadata() -> Runtime_V1_ContainerMetadata {
+        .with {
+            $0.name = name
+            $0.attempt = attempt
+        }
+    }
+
+    func toImageSpec() -> Runtime_V1_ImageSpec {
+        .with { $0.image = image }
+    }
+
+    func toListItem() -> Runtime_V1_Container {
+        .with {
+            $0.id = id
+            $0.podSandboxID = sandboxID
+            $0.metadata = toMetadata()
+            $0.image = toImageSpec()
+            $0.imageRef = imageRef
+            $0.imageID = imageRef
+            $0.state = phase.toCRI()
+            $0.createdAt = createdAt
+            $0.labels = labels
+            $0.annotations = annotations
+        }
+    }
+
+    func toStatus() -> Runtime_V1_ContainerStatus {
+        .with {
+            $0.id = id
+            $0.metadata = toMetadata()
+            $0.state = phase.toCRI()
+            $0.createdAt = createdAt
+            $0.startedAt = startedAt
+            $0.finishedAt = finishedAt
+            $0.exitCode = exitCode
+            $0.image = toImageSpec()
+            $0.imageRef = imageRef
+            $0.imageID = imageRef
+            $0.labels = labels
+            $0.annotations = annotations
+            $0.logPath = logPath
+            $0.reason = phase == .exited ? "Completed" : ""
+        }
+    }
+
+    func toStats() -> Runtime_V1_ContainerStats {
+        .with {
+            $0.attributes = .with {
+                $0.id = id
+                $0.metadata = toMetadata()
+                $0.labels = labels
+                $0.annotations = annotations
+            }
+            $0.cpu = Runtime_V1_CpuUsage()
+            $0.memory = Runtime_V1_MemoryUsage()
+            $0.writableLayer = Runtime_V1_FilesystemUsage()
+        }
+    }
+}
+
+extension ContainerPhase {
+    func toCRI() -> Runtime_V1_ContainerState {
+        switch self {
+        case .created: return .containerCreated
+        case .running: return .containerRunning
+        case .exited: return .containerExited
+        }
+    }
+}
+
+extension ImageRecord {
+    func toCRI() -> Runtime_V1_Image {
+        .with {
+            $0.id = id
+            $0.repoTags = [reference]
+            $0.size = size
+            $0.spec = .with { $0.image = reference }
+        }
+    }
+}
+
+extension Runtime_V1_PodSandboxFilter {
+    func matches(_ record: SandboxRecord) -> Bool {
+        if !id.isEmpty && id != record.id { return false }
+        if hasState {
+            let wanted: SandboxPhase = state.state == .sandboxReady ? .ready : .notReady
+            if wanted != record.phase { return false }
+        }
+        return labelSelector.allSatisfy { record.labels[$0.key] == $0.value }
+    }
+}
+
+extension Runtime_V1_ContainerFilter {
+    func matches(_ record: ContainerRecord) -> Bool {
+        if !id.isEmpty && id != record.id { return false }
+        if !podSandboxID.isEmpty && podSandboxID != record.sandboxID { return false }
+        if hasState && state.state != record.phase.toCRI() { return false }
+        return labelSelector.allSatisfy { record.labels[$0.key] == $0.value }
+    }
+}

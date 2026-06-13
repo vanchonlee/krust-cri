@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "alpine",
+    "attempt": 1
+  },
+  "image": {
+    "image": "docker.io/library/alpine:3.20"
+  },
+  "command": [
+    "/bin/sh"
+  ],
+  "args": [
+    "-c",
+    "echo hello from krust-cri; sleep 30"
+  ],
+  "log_path": "alpine/1.log",
+  "linux": {}
+}
