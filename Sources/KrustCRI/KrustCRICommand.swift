@@ -28,6 +28,12 @@ struct KrustCRICommand: AsyncParsableCommand {
     @Option(help: "Backend to use: mvp or containerization.")
     var backend: String = "mvp"
 
+    @Option(help: "Linux cgroup driver reported through RuntimeConfig: systemd or cgroupfs.")
+    var cgroupDriver: String = "systemd"
+
+    @Option(help: "Host directory used when kubelet requests container logs under /var/log/pods.")
+    var hostPodLogsDir: String = "/tmp/krust-cri-pod-logs"
+
     @Option(help: "Linux kernel path for the containerization backend.")
     var kernel: String?
 
@@ -62,12 +68,23 @@ struct KrustCRICommand: AsyncParsableCommand {
         default:
             throw ValidationError("--backend must be either 'mvp' or 'containerization'")
         }
+        let runtimeCgroupDriver: Runtime_V1_CgroupDriver
+        switch cgroupDriver {
+        case "systemd":
+            runtimeCgroupDriver = .systemd
+        case "cgroupfs":
+            runtimeCgroupDriver = .cgroupfs
+        default:
+            throw ValidationError("--cgroup-driver must be either 'systemd' or 'cgroupfs'")
+        }
         let runtimeService = CRIRuntimeService(
             runtimeName: runtimeName,
             runtimeVersion: runtimeVersion,
             state: state,
             runtime: runtime,
             backendName: backend,
+            cgroupDriver: runtimeCgroupDriver,
+            hostPodLogsDir: hostPodLogsDir,
             logger: logger
         )
         let imageService = CRIImageService(state: state, backendName: backend, logger: logger)

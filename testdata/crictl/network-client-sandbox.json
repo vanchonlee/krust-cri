@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "name": "krust-network-client",
+    "namespace": "default",
+    "uid": "krust-network-client-uid",
+    "attempt": 1
+  },
+  "hostname": "krust-network-client",
+  "log_directory": "/tmp/krust-cri-logs",
+  "linux": {}
+}

@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "server",
+    "attempt": 1
+  },
+  "image": {
+    "image": "docker.io/library/busybox:1.36.1"
+  },
+  "command": [
+    "/bin/sh"
+  ],
+  "args": [
+    "-c",
+    "echo krust-network-server-starting; mkdir -p /www; echo hello-from-krust-pod-a > /www/index.html; exec httpd -f -p 0.0.0.0:8080 -h /www"
+  ],
+  "log_path": "server/1.log",
+  "linux": {}
+}

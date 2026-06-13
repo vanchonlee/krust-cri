@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "client",
+    "attempt": 1
+  },
+  "image": {
+    "image": "docker.io/library/busybox:1.36.1"
+  },
+  "command": [
+    "/bin/sh"
+  ],
+  "args": [
+    "-c",
+    "for i in $(seq 1 60); do wget -qO- http://__SERVER_IP__:8080 && exit 0; sleep 1; done; exit 1"
+  ],
+  "log_path": "client/1.log",
+  "linux": {}
+}

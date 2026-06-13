@@ -63,7 +63,7 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
         }
     }
 
-    func runSandbox(_ record: SandboxRecord) async throws {
+    func runSandbox(_ record: SandboxRecord) async throws -> SandboxRecord {
         var podRecord = record
         let interfaces = try allocateInterfaces(for: record.id)
         if let first = interfaces.first {
@@ -82,6 +82,7 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
 
         pods[record.id] = LivePod(record: podRecord, pod: pod, created: false)
         logger.info("containerization pod registered", metadata: ["sandbox": "\(record.id)"])
+        return podRecord
     }
 
     func status() async -> RuntimeBackendStatus {
@@ -242,7 +243,7 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
         throw RuntimeBackendError.unsupported
     }
 
-    func runSandbox(_ record: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }
+    func runSandbox(_ record: SandboxRecord) async throws -> SandboxRecord { throw RuntimeBackendError.unsupported }
     func stopSandbox(_ record: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }
     func createContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }
     func startContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }

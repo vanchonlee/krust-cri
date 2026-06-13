@@ -6,7 +6,8 @@ let package = Package(
     name: "krust-cri",
     platforms: [.macOS("15.0")],
     products: [
-        .executable(name: "krust-cri", targets: ["KrustCRI"])
+        .executable(name: "krust-cri", targets: ["KrustCRI"]),
+        .executable(name: "krust-kubelet-pod", targets: ["KrustKubeletPod"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
@@ -30,6 +31,16 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+            ]
+        ),
+        .executableTarget(
+            name: "KrustKubeletPod",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),

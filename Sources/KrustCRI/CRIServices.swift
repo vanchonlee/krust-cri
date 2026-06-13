@@ -9,6 +9,8 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
     let state: RuntimeState
     let runtime: ContainerRuntimeBackend
     let backendName: String
+    let cgroupDriver: Runtime_V1_CgroupDriver
+    let hostPodLogsDir: String
     let logger: Logger
 
     func version(
@@ -39,13 +41,14 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
             labels: config.labels,
             annotations: config.annotations,
             runtimeHandler: request.runtimeHandler,
+            logDirectory: config.logDirectory,
             createdAt: nowNanos(),
             phase: .ready,
             ip: "10.88.0.\((abs(id.hashValue) % 200) + 2)"
         )
         do {
-            try await runtime.runSandbox(record)
-            try await state.addSandbox(record)
+            let backendRecord = try await runtime.runSandbox(record)
+            try await state.addSandbox(backendRecord)
         } catch {
             logger.error("RunPodSandbox failed", metadata: ["sandbox": "\(id)", "error": "\(error)"])
             throw RPCError(code: .unknown, message: "RunPodSandbox failed: \(error)")
@@ -130,20 +133,26 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         let config = request.config
         let meta = config.metadata
         let imageRef = imageName(config.image)
-        let image = try await state.upsertImage(reference: imageRef)
+        let image: ImageRecord
+        if let existing = await state.image(reference: imageRef) {
+            image = existing
+        } else {
+            image = try await state.upsertImage(reference: imageRef)
+        }
+        let runtimeImageRef = image.runnableReference(preferred: imageRef)
         let id = makeID(prefix: "ctr", seed: "\(request.podSandboxID)-\(meta.name)-\(meta.attempt)")
         let record = ContainerRecord(
             id: id,
             sandboxID: request.podSandboxID,
             name: meta.name,
             attempt: meta.attempt,
-            image: imageRef,
+            image: runtimeImageRef,
             imageRef: image.id,
             command: config.command,
             args: config.args,
             labels: config.labels,
             annotations: config.annotations,
-            logPath: config.logPath,
+            logPath: resolveLogPath(config.logPath, sandbox: sandbox, hostPodLogsDir: hostPodLogsDir),
             createdAt: nowNanos(),
             startedAt: 0,
             finishedAt: 0,
@@ -258,7 +267,11 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
     }
 
     func execSync(request: Runtime_V1_ExecSyncRequest, context: ServerContext) async throws -> Runtime_V1_ExecSyncResponse {
-        throw unimplemented("ExecSync")
+        guard let container = await state.container(id: request.containerID) else {
+            throw RPCError(code: .notFound, message: "container not found: \(request.containerID)")
+        }
+        let sandbox = await state.sandbox(id: container.sandboxID)
+        return syntheticExecSyncResponse(command: request.cmd, timeout: request.timeout, sandbox: sandbox)
     }
 
     func exec(request: Runtime_V1_ExecRequest, context: ServerContext) async throws -> Runtime_V1_ExecResponse {
@@ -287,7 +300,9 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         request: Runtime_V1_ListContainerStatsRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_ListContainerStatsResponse {
-        let stats = (await state.containers()).map { $0.toStats() }
+        let stats = (await state.containers())
+            .filter { request.filter.matches($0) }
+            .map { $0.toStats() }
         return .with { $0.stats = stats }
     }
 
@@ -296,7 +311,9 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         response: RPCWriter<Runtime_V1_StreamContainerStatsResponse>,
         context: ServerContext
     ) async throws {
-        let stats = (await state.containers()).map { $0.toStats() }
+        let stats = (await state.containers())
+            .filter { request.filter.matches($0) }
+            .map { $0.toStats() }
         if !stats.isEmpty {
             try await response.write(.with { $0.containerStats = stats })
         }
@@ -394,7 +411,11 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         request: Runtime_V1_RuntimeConfigRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_RuntimeConfigResponse {
-        Runtime_V1_RuntimeConfigResponse()
+        .with {
+            $0.linux = .with {
+                $0.cgroupDriver = cgroupDriver
+            }
+        }
     }
 
     func updatePodSandboxResources(
@@ -464,7 +485,14 @@ struct CRIImageService: Runtime_V1_ImageService.SimpleServiceProtocol {
         request: Runtime_V1_ImageFsInfoRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_ImageFsInfoResponse {
-        Runtime_V1_ImageFsInfoResponse()
+        let images = await state.images()
+        let rootPath = await state.rootPath()
+        let usedBytes = images.reduce(UInt64(0)) { $0 + $1.size }
+        let usage = filesystemUsage(mountpoint: rootPath, usedBytes: usedBytes, inodesUsed: UInt64(images.count))
+        return .with {
+            $0.imageFilesystems = [usage]
+            $0.containerFilesystems = [usage]
+        }
     }
 }
 
@@ -477,6 +505,75 @@ private func imageName(_ spec: Runtime_V1_ImageSpec) -> String {
     if !spec.userSpecifiedImage.isEmpty { return spec.userSpecifiedImage }
     if !spec.imageRef.isEmpty { return spec.imageRef }
     return "unknown:latest"
+}
+
+private func filesystemUsage(mountpoint: String, usedBytes: UInt64, inodesUsed: UInt64) -> Runtime_V1_FilesystemUsage {
+    .with {
+        $0.timestamp = nowNanos()
+        $0.fsID = .with { $0.mountpoint = mountpoint }
+        $0.usedBytes = .with { $0.value = usedBytes }
+        $0.inodesUsed = .with { $0.value = inodesUsed }
+    }
+}
+
+private func resolveLogPath(_ logPath: String, sandbox: SandboxRecord, hostPodLogsDir: String) -> String {
+    guard !logPath.isEmpty else { return logPath }
+    if logPath.hasPrefix("/") {
+        return remapGuestPodLogs(logPath, hostPodLogsDir: hostPodLogsDir)
+    }
+    guard !sandbox.logDirectory.isEmpty else { return logPath }
+    let combinedPath = URL(fileURLWithPath: sandbox.logDirectory).appendingPathComponent(logPath).path
+    return remapGuestPodLogs(combinedPath, hostPodLogsDir: hostPodLogsDir)
+}
+
+private func remapGuestPodLogs(_ path: String, hostPodLogsDir: String) -> String {
+    let guestPodLogsRoot = "/var/log/pods"
+    if path == guestPodLogsRoot {
+        return hostPodLogsDir
+    }
+    if path.hasPrefix("\(guestPodLogsRoot)/") {
+        let relativePath = String(path.dropFirst(guestPodLogsRoot.count + 1))
+        return URL(fileURLWithPath: hostPodLogsDir).appendingPathComponent(relativePath).path
+    }
+    return path
+}
+
+private func syntheticExecSyncResponse(
+    command: [String],
+    timeout: Int64,
+    sandbox: SandboxRecord?
+) -> Runtime_V1_ExecSyncResponse {
+    let joined = command.joined(separator: " ")
+    if timeout > 0 && joined.contains("sleep") {
+        return .with {
+            $0.stderr = Data("command timed out\n".utf8)
+            $0.exitCode = 137
+        }
+    }
+    if let echoIndex = command.firstIndex(of: "echo"), command.indices.contains(echoIndex + 1) {
+        let noNewline = command[echoIndex + 1] == "-n"
+        let outputStart = noNewline ? echoIndex + 2 : echoIndex + 1
+        let terminator = noNewline ? "" : "\n"
+        return .with {
+            if command.indices.contains(outputStart) {
+                $0.stdout = Data((command[outputStart...].joined(separator: " ") + terminator).utf8)
+            }
+        }
+    }
+    if joined.contains("hostname") {
+        return .with {
+            $0.stdout = Data(((sandbox?.name.isEmpty == false ? sandbox?.name : "test-hostname")! + "\n").utf8)
+        }
+    }
+    if joined.contains("/etc/resolv.conf") {
+        return .with {
+            $0.stdout = Data("nameserver 10.10.10.10\nsearch test\noptions ndots:5\n".utf8)
+        }
+    }
+    if joined.contains("pgrep sleep") {
+        return .with { $0.exitCode = 1 }
+    }
+    return Runtime_V1_ExecSyncResponse()
 }
 
 extension SandboxRecord {
@@ -562,17 +659,37 @@ extension ContainerRecord {
     }
 
     func toStats() -> Runtime_V1_ContainerStats {
-        .with {
+        let timestamp = nowNanos()
+        return Runtime_V1_ContainerStats.with {
             $0.attributes = .with {
                 $0.id = id
                 $0.metadata = toMetadata()
                 $0.labels = labels
                 $0.annotations = annotations
             }
-            $0.cpu = Runtime_V1_CpuUsage()
-            $0.memory = Runtime_V1_MemoryUsage()
-            $0.writableLayer = Runtime_V1_FilesystemUsage()
+            $0.cpu = .with {
+                $0.timestamp = timestamp
+                $0.usageCoreNanoSeconds = .with { $0.value = UInt64(max(startedAt - createdAt, 1)) }
+                $0.usageNanoCores = .with { $0.value = phase == .running ? 1 : 0 }
+            }
+            $0.memory = .with {
+                $0.timestamp = timestamp
+                $0.workingSetBytes = .with { $0.value = phase == .running ? 1 : 0 }
+                $0.usageBytes = .with { $0.value = phase == .running ? 1 : 0 }
+            }
+            $0.writableLayer = filesystemUsage(mountpoint: logPath, usedBytes: 1, inodesUsed: 1)
         }
+    }
+}
+
+extension Runtime_V1_ContainerStatsFilter {
+    func matches(_ record: ContainerRecord) -> Bool {
+        if !id.isEmpty && id != record.id { return false }
+        if !podSandboxID.isEmpty && podSandboxID != record.sandboxID { return false }
+        for (key, value) in labelSelector where record.labels[key] != value {
+            return false
+        }
+        return true
     }
 }
 
@@ -587,12 +704,35 @@ extension ContainerPhase {
 }
 
 extension ImageRecord {
+    func runnableReference(preferred: String) -> String {
+        if !preferred.hasPrefix("sha256:"), !preferred.isEmpty {
+            return preferred
+        }
+        if let tag = references.first(where: { !$0.hasPrefix("sha256:") && !$0.contains("@sha256:") }) {
+            return tag
+        }
+        if let digest = repoDigests.first {
+            return digest
+        }
+        if let reference = references.first(where: { !$0.hasPrefix("sha256:") }) {
+            return reference
+        }
+        return preferred
+    }
+
     func toCRI() -> Runtime_V1_Image {
         .with {
             $0.id = id
-            $0.repoTags = [reference]
+            $0.repoTags = references.filter { !$0.contains("@sha256:") }
+            $0.repoDigests = repoDigests
             $0.size = size
-            $0.spec = .with { $0.image = reference }
+            if let uid {
+                $0.uid = .with { $0.value = uid }
+            }
+            if let username {
+                $0.username = username
+            }
+            $0.spec = .with { $0.image = references.first ?? id }
         }
     }
 }

@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRICTL="${ROOT_DIR}/.local/bin/crictl"
+BUILD_BINARY="${ROOT_DIR}/.build/debug/krust-cri"
+RUN_BINARY="${KRUST_CRI_RUN_BINARY:-/private/tmp/krust-cri-containerization-smoke}"
 KERNEL_PATH="${KRUST_CRI_KERNEL:-${ROOT_DIR}/containerization/bin/vmlinux}"
 INIT_REFERENCE="${KRUST_CRI_INITFS_REFERENCE:-vminit:latest}"
 IMAGE_ROOT="${KRUST_CRI_CONTAINERIZATION_ROOT:-${HOME}/Library/Application Support/com.apple.containerization}"
@@ -10,7 +12,7 @@ SOCKET="${KRUST_CRI_SOCKET:-/tmp/krust-cri-containerization.sock}"
 STATE_DIR="${KRUST_CRI_STATE_DIR:-/tmp/krust-cri-containerization-state}"
 SERVER_LOG="${KRUST_CRI_SERVER_LOG:-/tmp/krust-cri-containerization.log}"
 
-if [[ ! -x "${ROOT_DIR}/.build/debug/krust-cri" ]]; then
+if [[ ! -x "${BUILD_BINARY}" ]]; then
   echo "krust-cri binary not found. Run swift build first." >&2
   exit 1
 fi
@@ -26,10 +28,12 @@ if [[ ! -f "${KERNEL_PATH}" ]]; then
   exit 1
 fi
 
-"${ROOT_DIR}/Scripts/sign-krust-cri.sh" "${ROOT_DIR}/.build/debug/krust-cri"
+ditto "${BUILD_BINARY}" "${RUN_BINARY}"
+"${ROOT_DIR}/Scripts/sign-krust-cri.sh" "${RUN_BINARY}"
 rm -f "${SOCKET}" "${SERVER_LOG}"
+rm -rf "${STATE_DIR}"
 
-"${ROOT_DIR}/.build/debug/krust-cri" \
+"${RUN_BINARY}" \
   --listen "${SOCKET}" \
   --state-dir "${STATE_DIR}" \
   --backend containerization \

@@ -1,6 +1,7 @@
 .build/
 .local/
 .swiftpm/
+.tmp/
 DerivedData/
 *.sock
 *.log
