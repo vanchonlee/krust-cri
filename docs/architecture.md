@@ -614,6 +614,7 @@ It proves:
 - Kubernetes API creates two workload pods,
 - kubelet creates and starts those pods through `krust-cri`,
 - direct pod IP traffic works from client pod to server pod,
+- the client pod exits and reaches `Completed`,
 - the client CRI log contains `hello-from-k3s-pod-a`.
 
 The later multi-node target shape is:
@@ -742,9 +743,9 @@ kubectl delete pod ...
 Scripts/smoke-k3s-single-node.sh
 ```
 
-Current caveat: process-exit monitoring is not complete, so the verified smoke
-uses the client pod CRI log payload as proof of pod-to-pod success instead of
-requiring the pod phase to become `Succeeded`.
+Current caveat: process-exit monitoring is implemented for the current Apple
+Containerization backend path, but restart policy behavior, termination reasons,
+and log reopen semantics still need hardening before alpha.
 
 ### Phase 3: networking alpha
 

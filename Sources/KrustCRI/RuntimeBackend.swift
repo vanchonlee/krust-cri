@@ -9,12 +9,18 @@ struct RuntimeBackendStatus: Sendable {
     static let ready = RuntimeBackendStatus(runtimeReady: true, networkReady: true, info: [:])
 }
 
+struct RuntimeContainerExitStatus: Sendable {
+    var exitCode: Int32
+    var finishedAt: Int64
+}
+
 protocol ContainerRuntimeBackend: Sendable {
     func status() async -> RuntimeBackendStatus
     func runSandbox(_ record: SandboxRecord) async throws -> SandboxRecord
     func stopSandbox(_ record: SandboxRecord) async throws
     func createContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws
     func startContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws
+    func waitContainerExit(_ record: ContainerRecord, sandbox: SandboxRecord) async throws -> RuntimeContainerExitStatus
     func stopContainer(_ record: ContainerRecord, sandbox: SandboxRecord?) async throws
     func removeContainer(_ record: ContainerRecord) async throws
 }
@@ -43,18 +49,18 @@ struct MVPContainerRuntime: ContainerRuntimeBackend {
 
     func startContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws {
         try writeSyntheticLog(for: record)
-        if shouldAutoExit(record) {
-            Task {
-                try? await Task.sleep(for: .milliseconds(250))
-                try? await state.updateContainer(id: record.id) {
-                    guard $0.phase == .running else { return }
-                    $0.phase = .exited
-                    $0.finishedAt = nowNanos()
-                    $0.exitCode = 0
-                }
-            }
-        }
         logger.info("mvp container started", metadata: ["container": "\(record.id)", "sandbox": "\(sandbox.id)"])
+    }
+
+    func waitContainerExit(_ record: ContainerRecord, sandbox: SandboxRecord) async throws -> RuntimeContainerExitStatus {
+        if shouldAutoExit(record) {
+            try await Task.sleep(for: .milliseconds(250))
+            return RuntimeContainerExitStatus(exitCode: 0, finishedAt: nowNanos())
+        }
+        while !Task.isCancelled {
+            try await Task.sleep(for: .seconds(3600))
+        }
+        throw CancellationError()
     }
 
     func stopContainer(_ record: ContainerRecord, sandbox: SandboxRecord?) async throws {

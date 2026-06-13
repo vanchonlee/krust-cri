@@ -89,7 +89,7 @@ Short version: make the CRI surface honest first, then deepen the Apple backend.
 3. Networking: harden the current vmnet pod-to-pod PoC, then add DNS, port
    mappings, service networking, and multi-node routing deliberately.
 4. Kubelet/k3s path, now proven as PoC: keep closing the missing CRI semantics
-   kubelet expects, especially container exit monitoring and richer logs/stats.
+   kubelet expects, especially log reopen, restart behavior, and richer stats.
 5. Developer experience: package assets, signing, config, smoke tests, and
    diagnostics into a repeatable local setup.
 
@@ -159,8 +159,7 @@ Harden the Apple Containerization backend beyond the MVP demo:
 - Harden vmnet packaging/signing beyond the `/private/tmp` development smoke
   path.
 - Add DNS, port mappings, service networking, and multi-node routing.
-- Map container exit status back into CRI state. The k3s PoC currently proves
-  pod-to-pod traffic through CRI logs while the client pod may remain `Running`
-  until process lifecycle watching is implemented.
+- Harden container termination semantics beyond the current exit-code and
+  finished-at tracking.
 - Implement `ContainerStats` from `LinuxPod.statistics`.
 - Improve `kubectl logs`/log reopen behavior and Kubernetes status fidelity.

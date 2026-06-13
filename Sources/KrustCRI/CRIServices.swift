@@ -185,6 +185,7 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
             $0.startedAt = nowNanos()
             $0.finishedAt = 0
         }
+        observeContainerExit(container: container, sandbox: sandbox, runtime: runtime, state: state, logger: logger)
         return Runtime_V1_StartContainerResponse()
     }
 
@@ -423,6 +424,44 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         context: ServerContext
     ) async throws -> Runtime_V1_UpdatePodSandboxResourcesResponse {
         Runtime_V1_UpdatePodSandboxResourcesResponse()
+    }
+}
+
+private func observeContainerExit(
+    container: ContainerRecord,
+    sandbox: SandboxRecord,
+    runtime: any ContainerRuntimeBackend,
+    state: RuntimeState,
+    logger: Logger
+) {
+    Task {
+        do {
+            let exit = try await runtime.waitContainerExit(container, sandbox: sandbox)
+            try await state.updateContainer(id: container.id) {
+                guard $0.phase == .running else { return }
+                $0.phase = .exited
+                $0.finishedAt = exit.finishedAt
+                $0.exitCode = exit.exitCode
+            }
+            logger.info(
+                "container exited",
+                metadata: [
+                    "container": "\(container.id)",
+                    "sandbox": "\(sandbox.id)",
+                    "exitCode": "\(exit.exitCode)",
+                ]
+            )
+        } catch is CancellationError {
+        } catch {
+            logger.warning(
+                "container exit observer failed",
+                metadata: [
+                    "container": "\(container.id)",
+                    "sandbox": "\(sandbox.id)",
+                    "error": "\(error)",
+                ]
+            )
+        }
     }
 }
 

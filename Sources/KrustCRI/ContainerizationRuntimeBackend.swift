@@ -139,6 +139,17 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
         logger.info("containerization container started", metadata: ["container": "\(record.id)"])
     }
 
+    func waitContainerExit(_ record: ContainerRecord, sandbox: SandboxRecord) async throws -> RuntimeContainerExitStatus {
+        guard let live = pods[sandbox.id] else {
+            throw RuntimeBackendError.notFound("live pod not found: \(sandbox.id)")
+        }
+        let status = try await live.pod.waitContainer(record.id)
+        return RuntimeContainerExitStatus(
+            exitCode: status.exitCode,
+            finishedAt: nanos(since1970: status.exitedAt)
+        )
+    }
+
     func stopContainer(_ record: ContainerRecord, sandbox: SandboxRecord?) async throws {
         let sandboxID = sandbox?.id ?? record.sandboxID
         guard let live = pods[sandboxID] else { return }
@@ -199,6 +210,10 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
     }
 }
 
+private func nanos(since1970 date: Date) -> Int64 {
+    Int64(date.timeIntervalSince1970 * 1_000_000_000)
+}
+
 private enum RuntimeBackendError: Error, CustomStringConvertible {
     case notFound(String)
 
@@ -247,6 +262,7 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
     func stopSandbox(_ record: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }
     func createContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }
     func startContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws { throw RuntimeBackendError.unsupported }
+    func waitContainerExit(_ record: ContainerRecord, sandbox: SandboxRecord) async throws -> RuntimeContainerExitStatus { throw RuntimeBackendError.unsupported }
     func stopContainer(_ record: ContainerRecord, sandbox: SandboxRecord?) async throws { throw RuntimeBackendError.unsupported }
     func removeContainer(_ record: ContainerRecord) async throws { throw RuntimeBackendError.unsupported }
 }

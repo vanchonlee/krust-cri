@@ -46,7 +46,7 @@ krust-macos   Ready    v1.35.0+k3s1   krust-cri://0.1.0-mvp
 server pod ip=192.168.64.2
 /tmp/krust-cri-k3s-logs/.../client/0.log: hello-from-k3s-pod-a
 
-krust-k3s-client   1/1 Running   IP 192.168.64.3
+krust-k3s-client   0/1 Completed IP 192.168.64.3
 krust-k3s-server   1/1 Running   IP 192.168.64.2
 
 k3s single-node krust-cri pod-to-pod smoke test complete
@@ -63,6 +63,8 @@ This proves:
 - Apple `VmnetNetwork` assigns pod IPs.
 - Direct pod-to-pod TCP works on the same node.
 - CRI log output captures the pod-to-pod proof payload.
+- Container process exit is observed through Apple Containerization and
+  reflected back to kubelet, so the client pod reaches `Completed`.
 
 ## Supporting Smokes
 
@@ -106,9 +108,9 @@ The PoC intentionally does not claim full Kubernetes node support yet.
 
 Known gaps:
 
-- Container process exit monitoring is not complete. The k3s proof checks the
-  CRI log payload instead of requiring the client pod phase to become
-  `Succeeded`.
+- Container process exit monitoring is implemented for the Apple
+  Containerization backend, but restart policy behavior and richer termination
+  reasons still need hardening.
 - `kubectl logs` needs more hardening around CRI log path behavior and log
   reopen semantics.
 - DNS is not part of the current network proof; the k3s smoke uses direct pod
@@ -121,11 +123,11 @@ Known gaps:
 
 ## Next Milestone
 
-The next technical milestone should make kubelet status fidelity match the
-runtime behavior:
+The next technical milestone should make kubelet logs and restart semantics
+more complete:
 
-- watch Apple Containerization process exits,
-- update CRI `ContainerStatus` to `exited` with exit code and finish timestamp,
-- make Kubernetes pod phase reach `Succeeded` or `Failed`,
 - make `kubectl logs` work reliably for the k3s smoke,
+- implement `ReopenContainerLog`,
+- harden restart policy behavior,
+- preserve richer termination reasons,
 - keep the existing pod-to-pod proof passing.

@@ -218,13 +218,18 @@ spec:
 YAML
 
 for _ in $(seq 1 240); do
-  if grep -R "hello-from-k3s-pod-a" "${POD_LOGS_DIR}" >/dev/null 2>&1; then
-    grep -R "hello-from-k3s-pod-a" "${POD_LOGS_DIR}"
+  phase="$(kubectl get pod krust-k3s-client -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [[ "${phase}" == "Succeeded" ]]; then
+    logs="$(kubectl logs krust-k3s-client 2>/dev/null || true)"
+    if [[ "${logs}" == *"hello-from-k3s-pod-a"* ]]; then
+      printf '%s\n' "${logs}"
+    else
+      grep -R "hello-from-k3s-pod-a" "${POD_LOGS_DIR}"
+    fi
     kubectl get pods -o wide
     echo "k3s single-node krust-cri pod-to-pod smoke test complete"
     exit 0
   fi
-  phase="$(kubectl get pod krust-k3s-client -o jsonpath='{.status.phase}' 2>/dev/null || true)"
   if [[ "${phase}" == "Failed" ]]; then
     kubectl describe pod krust-k3s-client >&2 || true
     kubectl logs krust-k3s-client >&2 || true
@@ -233,7 +238,7 @@ for _ in $(seq 1 240); do
   sleep 1
 done
 
-echo "client pod did not produce pod-to-pod proof" >&2
+echo "client pod did not finish" >&2
 kubectl get pods -o wide >&2 || true
 kubectl describe pod krust-k3s-client >&2 || true
 cat "${WORK_DIR}/logs/k3s-server.log" >&2 || true
