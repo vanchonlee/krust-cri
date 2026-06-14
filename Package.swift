@@ -45,6 +45,10 @@ let package = Package(
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
             ]
+        ),
+        .testTarget(
+            name: "KrustCRITests",
+            dependencies: ["KrustCRI"]
         )
     ]
 )

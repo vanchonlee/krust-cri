@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KUBECTL="${KUBECTL:-$(command -v kubectl || true)}"
+JQ="${JQ:-$(command -v jq || true)}"
 CRICTL="${ROOT_DIR}/.local/bin/crictl"
 K3S="${KRUST_CRI_K3S:-${ROOT_DIR}/.local/bin/k3s-linux-arm64}"
 KRUST_CRI_BUILD="${ROOT_DIR}/.build/debug/krust-cri"
@@ -30,6 +31,11 @@ if [[ -z "${KUBECTL}" || ! -x "${KUBECTL}" ]]; then
     echo "kubectl not found. Set KUBECTL=/path/to/kubectl" >&2
     exit 1
   fi
+fi
+
+if [[ -z "${JQ}" || ! -x "${JQ}" ]]; then
+  echo "jq not found. Set JQ=/path/to/jq" >&2
+  exit 1
 fi
 
 for binary in "${KRUST_CRI_BUILD}" "${KUBELET_POD_BUILD}" "${K3S}" "${CRICTL}"; do
@@ -226,9 +232,7 @@ for _ in $(seq 1 240); do
     else
       grep -R "hello-from-k3s-pod-a" "${POD_LOGS_DIR}"
     fi
-    kubectl get pods -o wide
-    echo "k3s single-node krust-cri pod-to-pod smoke test complete"
-    exit 0
+    break
   fi
   if [[ "${phase}" == "Failed" ]]; then
     kubectl describe pod krust-k3s-client >&2 || true
@@ -238,8 +242,178 @@ for _ in $(seq 1 240); do
   sleep 1
 done
 
-echo "client pod did not finish" >&2
-kubectl get pods -o wide >&2 || true
-kubectl describe pod krust-k3s-client >&2 || true
-cat "${WORK_DIR}/logs/k3s-server.log" >&2 || true
+phase="$(kubectl get pod krust-k3s-client -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+if [[ "${phase}" != "Succeeded" ]]; then
+  echo "client pod did not finish" >&2
+  kubectl get pods -o wide >&2 || true
+  kubectl describe pod krust-k3s-client >&2 || true
+  cat "${WORK_DIR}/logs/k3s-server.log" >&2 || true
+  exit 1
+fi
+
+echo "==> Verify failed container termination status"
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: krust-k3s-fail
+  namespace: default
+spec:
+  nodeName: ${NODE_NAME}
+  restartPolicy: Never
+  containers:
+    - name: fail
+      image: docker.io/library/busybox:1.36.1
+      command:
+        - /bin/sh
+        - -c
+        - exit 42
+YAML
+
+for _ in $(seq 1 120); do
+  phase="$(kubectl get pod krust-k3s-fail -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [[ "${phase}" == "Failed" ]]; then
+    break
+  fi
+  sleep 1
+done
+
+FAILED_EXIT_CODE="$(kubectl get pod krust-k3s-fail -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)"
+FAILED_REASON="$(kubectl get pod krust-k3s-fail -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>/dev/null || true)"
+FAILED_MESSAGE="$(kubectl get pod krust-k3s-fail -o jsonpath='{.status.containerStatuses[0].state.terminated.message}' 2>/dev/null || true)"
+if [[ "${FAILED_EXIT_CODE}" != "42" || "${FAILED_REASON}" != "Error" || "${FAILED_MESSAGE}" != *"42"* ]]; then
+  echo "failed pod termination status mismatch: exit=${FAILED_EXIT_CODE} reason=${FAILED_REASON} message=${FAILED_MESSAGE}" >&2
+  kubectl get pod krust-k3s-fail -o yaml >&2 || true
+  exit 1
+fi
+
+echo "==> Verify kubelet OnFailure restart behavior"
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: krust-k3s-restart
+  namespace: default
+spec:
+  nodeName: ${NODE_NAME}
+  restartPolicy: OnFailure
+  containers:
+    - name: restart
+      image: docker.io/library/busybox:1.36.1
+      command:
+        - /bin/sh
+        - -c
+        - exit 7
+YAML
+
+for _ in $(seq 1 180); do
+  RESTART_COUNT="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || true)"
+  LAST_EXIT_CODE="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)"
+  LAST_REASON="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)"
+  CURRENT_WAITING_REASON="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)"
+  if [[ "${CURRENT_WAITING_REASON}" == "RunContainerError" || "${CURRENT_WAITING_REASON}" == "CreateContainerError" ]]; then
+    break
+  fi
+  if [[ "${RESTART_COUNT}" =~ ^[0-9]+$ ]] && (( RESTART_COUNT >= 1 )) && [[ "${LAST_EXIT_CODE}" == "7" && "${LAST_REASON}" == "Error" ]]; then
+    echo "OnFailure restart verified: restartCount=${RESTART_COUNT}"
+    break
+  fi
+  sleep 1
+done
+
+RESTART_COUNT="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || true)"
+LAST_EXIT_CODE="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)"
+LAST_REASON="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)"
+CURRENT_WAITING_REASON="$(kubectl get pod krust-k3s-restart -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)"
+if ! [[ "${RESTART_COUNT}" =~ ^[0-9]+$ ]] || (( RESTART_COUNT < 1 )) || [[ "${LAST_EXIT_CODE}" != "7" || "${LAST_REASON}" != "Error" || "${CURRENT_WAITING_REASON}" == "RunContainerError" || "${CURRENT_WAITING_REASON}" == "CreateContainerError" ]]; then
+  echo "OnFailure restart status mismatch: restartCount=${RESTART_COUNT} lastExit=${LAST_EXIT_CODE} lastReason=${LAST_REASON} waiting=${CURRENT_WAITING_REASON}" >&2
+  kubectl get pod krust-k3s-restart -o yaml >&2 || true
+  exit 1
+fi
+
+echo "==> Verify live container log reopen after rotation"
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: krust-k3s-log-writer
+  namespace: default
+spec:
+  nodeName: ${NODE_NAME}
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: docker.io/library/busybox:1.36.1
+      command:
+        - /bin/sh
+        - -c
+        - while true; do echo krust-log-reopen-proof; sleep 1; done
+YAML
+
+for _ in $(seq 1 120); do
+  phase="$(kubectl get pod krust-k3s-log-writer -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [[ "${phase}" == "Running" ]]; then
+    writer_logs="$(kubectl logs krust-k3s-log-writer --tail=5 2>/dev/null || true)"
+    if [[ "${writer_logs}" == *"krust-log-reopen-proof"* ]]; then
+      break
+    fi
+  fi
+  sleep 1
+done
+
+writer_logs="$(kubectl logs krust-k3s-log-writer --tail=5 2>/dev/null || true)"
+if [[ "${writer_logs}" != *"krust-log-reopen-proof"* ]]; then
+  echo "log writer pod did not produce initial logs" >&2
+  kubectl describe pod krust-k3s-log-writer >&2 || true
+  exit 1
+fi
+
+WRITER_CONTAINER_ID="$(crictl ps --name '^writer$' --quiet | head -n 1)"
+if [[ -z "${WRITER_CONTAINER_ID}" ]]; then
+  echo "failed to find writer container id" >&2
+  crictl ps -a >&2 || true
+  exit 1
+fi
+
+echo "==> Verify live container stats"
+WRITER_STATS_JSON="$(crictl stats -o json "${WRITER_CONTAINER_ID}")"
+WRITER_STATS_ID="$(printf '%s\n' "${WRITER_STATS_JSON}" | "${JQ}" -r '.stats[0].attributes.id // ""')"
+WRITER_CPU_USAGE="$(printf '%s\n' "${WRITER_STATS_JSON}" | "${JQ}" -r '.stats[0].cpu.usageCoreNanoSeconds.value // ""')"
+WRITER_MEMORY_USAGE="$(printf '%s\n' "${WRITER_STATS_JSON}" | "${JQ}" -r '.stats[0].memory.usageBytes.value // ""')"
+if [[ "${WRITER_STATS_ID}" != "${WRITER_CONTAINER_ID}" || ! "${WRITER_CPU_USAGE}" =~ ^[0-9]+$ || ! "${WRITER_MEMORY_USAGE}" =~ ^[0-9]+$ ]]; then
+  echo "container stats mismatch: id=${WRITER_STATS_ID} cpu=${WRITER_CPU_USAGE} memory=${WRITER_MEMORY_USAGE}" >&2
+  printf '%s\n' "${WRITER_STATS_JSON}" >&2
+  exit 1
+fi
+echo "container stats verified: cpuCoreNs=${WRITER_CPU_USAGE} memoryBytes=${WRITER_MEMORY_USAGE}"
+
+WRITER_LOG_PATH="$(crictl inspect -o json "${WRITER_CONTAINER_ID}" | "${JQ}" -r '(if type == "array" then .[0] else . end).status.logPath // ""')"
+if [[ -z "${WRITER_LOG_PATH}" || ! -f "${WRITER_LOG_PATH}" ]]; then
+  echo "failed to resolve writer log path: ${WRITER_LOG_PATH}" >&2
+  crictl inspect "${WRITER_CONTAINER_ID}" >&2 || true
+  exit 1
+fi
+
+mv "${WRITER_LOG_PATH}" "${WRITER_LOG_PATH}.rotated"
+crictl logs --reopen "${WRITER_CONTAINER_ID}" >/dev/null
+
+for _ in $(seq 1 60); do
+  if [[ -f "${WRITER_LOG_PATH}" ]] && grep -q "krust-log-reopen-proof" "${WRITER_LOG_PATH}"; then
+    writer_logs="$(kubectl logs krust-k3s-log-writer --tail=5 2>/dev/null || true)"
+    if [[ "${writer_logs}" == *"krust-log-reopen-proof"* ]]; then
+      echo "live log reopen after rotation verified"
+      kubectl get pods -o wide
+      echo "k3s single-node krust-cri pod-to-pod smoke test complete"
+      exit 0
+    fi
+  fi
+  sleep 1
+done
+
+echo "writer log did not resume after reopen" >&2
+echo "--- rotated log ---" >&2
+cat "${WRITER_LOG_PATH}.rotated" >&2 || true
+echo "--- current log ---" >&2
+cat "${WRITER_LOG_PATH}" >&2 || true
+kubectl logs krust-k3s-log-writer --tail=20 >&2 || true
 exit 1

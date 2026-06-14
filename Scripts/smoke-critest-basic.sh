@@ -11,7 +11,7 @@ SERVER_LOG="${KRUST_CRI_SERVER_LOG:-${RUNTIME_DIR}/krust-cri.log}"
 REPORT_DIR="${KRUST_CRI_CRITEST_REPORT_DIR:-${RUNTIME_DIR}/reports}"
 
 FOCUS="${KRUST_CRI_CRITEST_FOCUS:-Runtime info|Image Manager|PodSandbox runtime should support basic operations|Idempotence|Container runtime should support basic operations on container runtime should support (creating container|starting container|stopping container|removing created container|removing running container|removing stopped container|execSync|listing container stats|listing stats for started containers|listing stats for three created containers|listing stats for containers filtered by labels)|Container runtime should support log runtime should support starting container with log}"
-SKIP="${KRUST_CRI_CRITEST_SKIP:-execSync with timeout|volume|reopening container log|Streaming|Networking}"
+SKIP="${KRUST_CRI_CRITEST_SKIP:-execSync with timeout|volume|Streaming|Networking}"
 
 if [[ ! -x "${BINARY}" ]]; then
   echo "krust-cri binary not found. Run swift build first." >&2

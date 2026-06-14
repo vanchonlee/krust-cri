@@ -109,10 +109,17 @@ The PoC intentionally does not claim full Kubernetes node support yet.
 Known gaps:
 
 - Container process exit monitoring is implemented for the Apple
-  Containerization backend, but restart policy behavior and richer termination
-  reasons still need hardening.
-- `kubectl logs` needs more hardening around CRI log path behavior and log
-  reopen semantics.
+  Containerization backend, and k3s now sees non-zero exits as `Error` with the
+  correct exit code. Restart policy behavior and richer termination details
+  still need hardening.
+- A basic `restartPolicy: OnFailure` k3s smoke passes: kubelet sees the failed
+  last state, creates a replacement container, and the pod reaches
+  `CrashLoopBackOff` rather than `RunContainerError`.
+- `ReopenContainerLog` now validates container IDs and reopens the live Apple
+  backend stdout/stderr writers after log rotation.
+- `ContainerStats` now returns live Apple backend CPU and memory usage from
+  `LinuxPod.statistics` for running containers.
+- `kubectl logs` still needs broader smoke coverage around rotated logs.
 - DNS is not part of the current network proof; the k3s smoke uses direct pod
   IP traffic.
 - Service networking is disabled for the smoke and remains a separate milestone.
@@ -120,14 +127,19 @@ Known gaps:
 - Resource stats are minimal and not yet suitable for real scheduling pressure.
 - Recovery after daemon restart, orphan cleanup, GC, volumes, security context,
   and RuntimeClass are not production-ready.
+- Live post-create `LinuxPod.addContainer` hotplug is not a committed MVP path.
+  Current research did not find a public Virtualization.framework runtime virtio
+  block attach API or a public Apple Containerization `HotplugProvider`
+  implementation. See `research/virtualization-hotplug-2026-06-14.md`.
 
 ## Next Milestone
 
-The next technical milestone should make kubelet logs and restart semantics
-more complete:
+The next technical milestone should make kubelet logs, restart semantics, and
+runtime observability more complete without depending on live virtio hotplug:
 
 - make `kubectl logs` work reliably for the k3s smoke,
-- implement `ReopenContainerLog`,
-- harden restart policy behavior,
-- preserve richer termination reasons,
+- add rotated-log smoke coverage for live Apple backend containers,
+- harden restart policy behavior for multi-container pods and sidecars,
+- preserve richer termination details,
+- broaden stats beyond live container CPU/memory and implement pod sandbox stats,
 - keep the existing pod-to-pod proof passing.

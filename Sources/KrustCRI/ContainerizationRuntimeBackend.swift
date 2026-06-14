@@ -11,6 +11,7 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
         var record: SandboxRecord
         var pod: LinuxPod
         var created: Bool
+        var logWriters: [String: ContainerLogWriters] = [:]
     }
 
     private let imageStore: ImageStore
@@ -69,16 +70,7 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
         if let first = interfaces.first {
             podRecord.ip = first.ipv4Address.address.description
         }
-        let podPath = self.root.appendingPathComponent("pods").appendingPathComponent(record.id)
-        try createDirectory(podPath)
-
-        let pod = try LinuxPod(record.id, vmm: vmm, logger: logger) { config in
-            config.cpus = 2
-            config.memoryInBytes = 1024 * 1024 * 1024
-            config.interfaces = interfaces
-            config.hostname = record.name.isEmpty ? nil : record.name
-            config.bootLog = BootLog.file(path: podPath.appendingPathComponent("boot.log"))
-        }
+        let pod = try makePod(record: podRecord, interfaces: interfaces)
 
         pods[record.id] = LivePod(record: podRecord, pod: pod, created: false)
         logger.info("containerization pod registered", metadata: ["sandbox": "\(record.id)"])
@@ -109,19 +101,45 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
             throw RuntimeBackendError.notFound("live pod not found: \(sandbox.id)")
         }
 
+        var livePod = live
+        if livePod.created {
+            logger.info(
+                "containerization pod reset before container creation",
+                metadata: ["sandbox": "\(sandbox.id)", "container": "\(record.id)"]
+            )
+            try await livePod.pod.stop()
+            for writers in livePod.logWriters.values {
+                writers.close()
+            }
+            livePod.logWriters.removeAll()
+            livePod.pod = try makePod(record: livePod.record, interfaces: livePod.pod.config.interfaces)
+            livePod.created = false
+        }
+
         let rootfs = try await rootfsMount(for: record)
         let logPath = try logPath(for: record)
-        try await live.pod.addContainer(record.id, rootfs: rootfs) { config in
-            config.process.arguments = record.command + record.args
-            if config.process.arguments.isEmpty {
-                config.process.arguments = ["/bin/sh"]
+        let logWriters = try ContainerLogWriters(
+            stdout: CRIFileLogWriter(path: logPath, stream: "stdout"),
+            stderr: CRIFileLogWriter(path: logPath, stream: "stderr")
+        )
+        do {
+            try await livePod.pod.addContainer(record.id, rootfs: rootfs) { config in
+                config.process.arguments = record.command + record.args
+                if config.process.arguments.isEmpty {
+                    config.process.arguments = ["/bin/sh"]
+                }
+                config.process.environmentVariables = ["PATH=\(LinuxProcessConfiguration.defaultPath)"]
+                config.process.workingDirectory = "/"
+                config.process.stdout = logWriters.stdout
+                config.process.stderr = logWriters.stderr
+                config.useInit = true
             }
-            config.process.environmentVariables = ["PATH=\(LinuxProcessConfiguration.defaultPath)"]
-            config.process.workingDirectory = "/"
-            config.process.stdout = try? FileLogWriter(path: logPath, stream: "stdout")
-            config.process.stderr = try? FileLogWriter(path: logPath, stream: "stderr")
-            config.useInit = true
+        } catch {
+            logWriters.close()
+            throw error
         }
+        livePod.logWriters[record.id] = logWriters
+        pods[sandbox.id] = livePod
         logger.info("containerization container created", metadata: ["container": "\(record.id)", "sandbox": "\(sandbox.id)"])
     }
 
@@ -159,11 +177,59 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
     }
 
     func removeContainer(_ record: ContainerRecord) async throws {
-        guard let live = pods[record.sandboxID] else { return }
+        guard var live = pods[record.sandboxID] else { return }
         if live.created {
             try? await live.pod.stopContainer(record.id)
         }
+        live.logWriters.removeValue(forKey: record.id)?.close()
+        pods[record.sandboxID] = live
         logger.info("containerization container removed", metadata: ["container": "\(record.id)"])
+    }
+
+    func reopenContainerLog(_ record: ContainerRecord) async throws {
+        guard let live = pods[record.sandboxID] else {
+            try reopenCRIContainerLogFile(record.logPath)
+            return
+        }
+        guard let logWriters = live.logWriters[record.id] else {
+            try reopenCRIContainerLogFile(record.logPath)
+            return
+        }
+        try logWriters.reopen()
+    }
+
+    func containerStats(_ record: ContainerRecord) async throws -> Runtime_V1_ContainerStats {
+        guard let live = pods[record.sandboxID], live.created else {
+            return record.toStats()
+        }
+        do {
+            guard let statistics = try await live.pod.statistics(
+                containerIDs: [record.id],
+                categories: [.cpu, .memory]
+            ).first else {
+                return record.toStats()
+            }
+            return record.toStats(containerization: statistics)
+        } catch {
+            logger.debug(
+                "containerization stats unavailable; returning fallback stats",
+                metadata: ["container": "\(record.id)", "error": "\(error)"]
+            )
+            return record.toStats()
+        }
+    }
+
+    private func makePod(record: SandboxRecord, interfaces: [any Interface]) throws -> LinuxPod {
+        let podPath = self.root.appendingPathComponent("pods").appendingPathComponent(record.id)
+        try createDirectory(podPath)
+
+        return try LinuxPod(record.id, vmm: vmm, logger: logger) { config in
+            config.cpus = 2
+            config.memoryInBytes = 1024 * 1024 * 1024
+            config.interfaces = interfaces
+            config.hostname = record.name.isEmpty ? nil : record.name
+            config.bootLog = BootLog.file(path: podPath.appendingPathComponent("boot.log"))
+        }
     }
 
     private func allocateInterfaces(for id: String) throws -> [any Interface] {
@@ -224,30 +290,46 @@ private enum RuntimeBackendError: Error, CustomStringConvertible {
     }
 }
 
-private final class FileLogWriter: Writer, @unchecked Sendable {
-    private let handle: FileHandle
-    private let stream: String
+private extension ContainerRecord {
+    func toStats(containerization statistics: ContainerStatistics) -> Runtime_V1_ContainerStats {
+        let timestamp = nowNanos()
+        var stats = toStats()
 
-    init(path: URL, stream: String) throws {
-        self.stream = stream
-        if !FileManager.default.fileExists(atPath: path.path) {
-            FileManager.default.createFile(atPath: path.path, contents: nil)
+        if let cpuStatistics = statistics.cpu {
+            var cpu = Runtime_V1_CpuUsage()
+            cpu.timestamp = timestamp
+            cpu.usageCoreNanoSeconds = .with { $0.value = cpuStatistics.usageUsec * 1_000 }
+            stats.cpu = cpu
         }
-        self.handle = try FileHandle(forWritingTo: path)
-        try self.handle.seekToEnd()
-    }
 
-    func write(_ data: Data) throws {
-        guard !data.isEmpty else { return }
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let line = "\(timestamp) \(stream) F \(String(decoding: data, as: UTF8.self))"
-        if let encoded = line.data(using: .utf8) {
-            try handle.write(contentsOf: encoded)
+        if let memoryStatistics = statistics.memory {
+            let workingSetBytes = memoryStatistics.usageBytes.saturatingSubtract(memoryStatistics.inactiveFile)
+            var memory = Runtime_V1_MemoryUsage()
+            memory.timestamp = timestamp
+            memory.usageBytes = .with { $0.value = memoryStatistics.usageBytes }
+            memory.workingSetBytes = .with { $0.value = workingSetBytes }
+            memory.availableBytes = .with { $0.value = memoryStatistics.limitBytes.saturatingSubtract(workingSetBytes) }
+            memory.rssBytes = .with { $0.value = memoryStatistics.anon }
+            memory.pageFaults = .with { $0.value = memoryStatistics.pageFaults }
+            memory.majorPageFaults = .with { $0.value = memoryStatistics.majorPageFaults }
+            stats.memory = memory
+
+            var swap = Runtime_V1_SwapUsage()
+            swap.timestamp = timestamp
+            swap.swapUsageBytes = .with { $0.value = memoryStatistics.swapUsageBytes }
+            swap.swapAvailableBytes = .with {
+                $0.value = memoryStatistics.swapLimitBytes.saturatingSubtract(memoryStatistics.swapUsageBytes)
+            }
+            stats.swap = swap
         }
-    }
 
-    func close() throws {
-        try handle.close()
+        return stats
+    }
+}
+
+private extension UInt64 {
+    func saturatingSubtract(_ value: UInt64) -> UInt64 {
+        self > value ? self - value : 0
     }
 }
 

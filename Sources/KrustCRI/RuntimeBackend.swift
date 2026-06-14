@@ -23,10 +23,20 @@ protocol ContainerRuntimeBackend: Sendable {
     func waitContainerExit(_ record: ContainerRecord, sandbox: SandboxRecord) async throws -> RuntimeContainerExitStatus
     func stopContainer(_ record: ContainerRecord, sandbox: SandboxRecord?) async throws
     func removeContainer(_ record: ContainerRecord) async throws
+    func reopenContainerLog(_ record: ContainerRecord) async throws
+    func containerStats(_ record: ContainerRecord) async throws -> Runtime_V1_ContainerStats
 }
 
 extension ContainerRuntimeBackend {
     func status() async -> RuntimeBackendStatus { .ready }
+
+    func reopenContainerLog(_ record: ContainerRecord) async throws {
+        try reopenCRIContainerLogFile(record.logPath)
+    }
+
+    func containerStats(_ record: ContainerRecord) async throws -> Runtime_V1_ContainerStats {
+        record.toStats()
+    }
 }
 
 struct MVPContainerRuntime: ContainerRuntimeBackend {
@@ -43,7 +53,7 @@ struct MVPContainerRuntime: ContainerRuntimeBackend {
     }
 
     func createContainer(_ record: ContainerRecord, sandbox: SandboxRecord) async throws {
-        try ensureLogFile(record.logPath)
+        try ensureCRIContainerLogFile(record.logPath)
         logger.info("mvp container created", metadata: ["container": "\(record.id)", "sandbox": "\(sandbox.id)"])
     }
 
@@ -71,15 +81,6 @@ struct MVPContainerRuntime: ContainerRuntimeBackend {
         logger.info("mvp container removed", metadata: ["container": "\(record.id)"])
     }
 
-    private func ensureLogFile(_ path: String) throws {
-        guard !path.isEmpty else { return }
-        let url = URL(fileURLWithPath: path)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-    }
-
     private func shouldAutoExit(_ record: ContainerRecord) -> Bool {
         let command = (record.command + record.args).joined(separator: " ")
         let longRunningTokens = ["sleep 30", "sleep 100", "sleep 3600", "pause", "top", "tail -f", "nginx"]
@@ -88,7 +89,7 @@ struct MVPContainerRuntime: ContainerRuntimeBackend {
 
     private func writeSyntheticLog(for record: ContainerRecord) throws {
         guard !record.logPath.isEmpty else { return }
-        try ensureLogFile(record.logPath)
+        try ensureCRIContainerLogFile(record.logPath)
         guard let message = syntheticEchoOutput(for: record) else { return }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let line = "\(timestamp) stdout F \(message)"

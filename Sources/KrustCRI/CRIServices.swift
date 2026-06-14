@@ -179,7 +179,12 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         guard let sandbox = await state.sandbox(id: container.sandboxID) else {
             throw RPCError(code: .notFound, message: "sandbox not found: \(container.sandboxID)")
         }
-        try await runtime.startContainer(container, sandbox: sandbox)
+        do {
+            try await runtime.startContainer(container, sandbox: sandbox)
+        } catch {
+            logger.error("StartContainer failed", metadata: ["container": "\(container.id)", "sandbox": "\(sandbox.id)", "error": "\(error)"])
+            throw RPCError(code: .unknown, message: "StartContainer failed: \(error)")
+        }
         try await state.updateContainer(id: container.id) {
             $0.phase = .running
             $0.startedAt = nowNanos()
@@ -264,7 +269,17 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         request: Runtime_V1_ReopenContainerLogRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_ReopenContainerLogResponse {
-        Runtime_V1_ReopenContainerLogResponse()
+        guard let container = await state.container(id: request.containerID) else {
+            throw RPCError(code: .notFound, message: "container not found: \(request.containerID)")
+        }
+        do {
+            try await runtime.reopenContainerLog(container)
+        } catch let error as LogManagerError {
+            throw RPCError(code: .failedPrecondition, message: error.description)
+        } catch {
+            throw RPCError(code: .unknown, message: "ReopenContainerLog failed: \(error)")
+        }
+        return Runtime_V1_ReopenContainerLogResponse()
     }
 
     func execSync(request: Runtime_V1_ExecSyncRequest, context: ServerContext) async throws -> Runtime_V1_ExecSyncResponse {
@@ -294,16 +309,18 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         guard let container = await state.container(id: request.containerID) else {
             throw RPCError(code: .notFound, message: "container not found: \(request.containerID)")
         }
-        return .with { $0.stats = container.toStats() }
+        let stats = try await runtime.containerStats(container)
+        return .with { $0.stats = stats }
     }
 
     func listContainerStats(
         request: Runtime_V1_ListContainerStatsRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_ListContainerStatsResponse {
-        let stats = (await state.containers())
-            .filter { request.filter.matches($0) }
-            .map { $0.toStats() }
+        var stats: [Runtime_V1_ContainerStats] = []
+        for container in (await state.containers()).filter({ request.filter.matches($0) }) {
+            stats.append(try await runtime.containerStats(container))
+        }
         return .with { $0.stats = stats }
     }
 
@@ -312,9 +329,10 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         response: RPCWriter<Runtime_V1_StreamContainerStatsResponse>,
         context: ServerContext
     ) async throws {
-        let stats = (await state.containers())
-            .filter { request.filter.matches($0) }
-            .map { $0.toStats() }
+        var stats: [Runtime_V1_ContainerStats] = []
+        for container in (await state.containers()).filter({ request.filter.matches($0) }) {
+            stats.append(try await runtime.containerStats(container))
+        }
         if !stats.isEmpty {
             try await response.write(.with { $0.containerStats = stats })
         }
@@ -693,7 +711,12 @@ extension ContainerRecord {
             $0.labels = labels
             $0.annotations = annotations
             $0.logPath = logPath
-            $0.reason = phase == .exited ? "Completed" : ""
+            if phase == .exited {
+                $0.reason = exitCode == 0 ? "Completed" : "Error"
+                if exitCode != 0 {
+                    $0.message = "container exited with code \(exitCode)"
+                }
+            }
         }
     }
 

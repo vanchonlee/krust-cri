@@ -68,6 +68,15 @@ See [docs/poc.md](docs/poc.md) for the verified PoC commands and evidence.
   `LinuxPod`; the node registers with `CONTAINER-RUNTIME=krust-cri://0.1.0-mvp`,
   Kubernetes creates two pods, and the client pod reaches the server pod by
   direct pod IP.
+- Kubelet-visible termination status for non-zero container exits, including
+  exit code, `Error` reason, and message.
+- Basic kubelet `restartPolicy: OnFailure` behavior: k3s observes the failed
+  container last state and starts a replacement container, reaching
+  `CrashLoopBackOff` instead of runtime create/start errors.
+- `ReopenContainerLog` validates the target container and reopens CRI log files,
+  including live Apple backend stdout/stderr writers after log rotation.
+- `ContainerStats` for live Apple backend containers maps CPU and memory usage
+  from `LinuxPod.statistics`.
 
 Streaming exec, attach, port-forward, checkpoint, events, and deeper stats are
 intentionally minimal in the state-backed MVP backend.
@@ -159,7 +168,8 @@ Harden the Apple Containerization backend beyond the MVP demo:
 - Harden vmnet packaging/signing beyond the `/private/tmp` development smoke
   path.
 - Add DNS, port mappings, service networking, and multi-node routing.
-- Harden container termination semantics beyond the current exit-code and
-  finished-at tracking.
-- Implement `ContainerStats` from `LinuxPod.statistics`.
-- Improve `kubectl logs`/log reopen behavior and Kubernetes status fidelity.
+- Harden restart policy behavior beyond the current single-container OnFailure
+  smoke path, especially multi-container pods and long-running sidecars.
+- Broaden stats beyond live container CPU/memory and improve pod sandbox stats.
+- Add broader `kubectl logs` smoke coverage around log rotation and improve
+  Kubernetes status fidelity.
