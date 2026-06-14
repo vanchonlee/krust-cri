@@ -1,119 +1,119 @@
 # krust-cri
 
-`krust-cri` is a proof-of-concept Kubernetes Container Runtime Interface (CRI)
-implementation for macOS.
+`krust-cri` is an experimental Kubernetes Container Runtime Interface (CRI)
+runtime for macOS.
 
-The project explores whether macOS can host a CRI runtime by combining:
+It exposes the official Kubernetes `runtime.v1` CRI API over a Unix socket and
+runs Linux workloads through Apple's open-source
+[Containerization](https://github.com/apple/containerization) package and
+`Virtualization.framework`.
 
-- the official Kubernetes CRI `runtime.v1` gRPC API,
-- Swift as the daemon/runtime implementation language,
-- Apple `Containerization` and `LinuxPod` as the Linux execution layer,
-- `crictl`, kubelet, and k3s as compatibility test clients.
+The current demo path is intentionally simple:
 
-The current MVP proves that a Swift daemon on macOS can expose a CRI Unix socket,
-accept `crictl` and kubelet calls, route pod/container lifecycle through Apple
-Containerization, and let a single-node k3s server create pods whose direct
-pod-to-pod traffic works through Apple `VmnetNetwork`.
+```text
+macOS host
+  -> krust-cri CRI socket
+  -> Apple Containerization backend
+  -> k3s/kubelet creates pods
+  -> kubectl verifies workload behavior
+```
 
-## Why
+This is a proof of concept, not a production Kubernetes runtime.
 
-Kubernetes assumes Linux container runtimes. macOS developers usually rely on a
-Linux VM plus containerd, Docker Desktop, Lima, Colima, or similar layers.
+## Current Status
 
-This repo asks a narrower research question:
+Verified on the local development path:
 
-Can we build a small CRI runtime that speaks Kubernetes directly on macOS while
-using Apple's native virtualization/container APIs underneath?
+- `krust-cri` starts a CRI `runtime.v1` Unix socket on macOS.
+- `crictl`, kubelet, and k3s can talk to that socket.
+- A Linux arm64 k3s server can run inside an Apple `LinuxPod`.
+- k3s registers a node with `CONTAINER-RUNTIME=krust-cri://0.1.0-mvp`.
+- `kubectl apply` can create workload pods through kubelet and `krust-cri`.
+- Same-node pod-to-pod TCP works through Apple `VmnetNetwork` pod IPs.
+- CRI logs work, including `ReopenContainerLog` for live log rotation.
+- Container exit status is visible to kubelet, including non-zero exit codes.
+- Basic `restartPolicy: OnFailure` reaches `CrashLoopBackOff` instead of
+  runtime create/start errors.
+- Live Apple backend `ContainerStats` returns CPU and memory usage from
+  `LinuxPod.statistics`.
 
-If the answer is yes, this can become a foundation for local Kubernetes runtime
-experiments, lighter macOS developer environments, and deeper research into what
-Apple Containerization can and cannot provide for Kubernetes-style workloads.
+Still missing or incomplete:
 
-## Architecture
+- DNS and Kubernetes service networking.
+- Port mappings and multi-node pod routing.
+- Full pod sandbox stats and broader resource accounting.
+- Multi-container/sidecar restart hardening.
+- Daemon restart recovery, orphan cleanup, GC, volumes, security context, and
+  RuntimeClass behavior.
+- Release packaging/signing beyond the local `/private/tmp` smoke path.
 
-`krust-cri` has two runtime backends:
+## Demo With k3s
 
-- `mvp`: a state-backed backend for fast CRI API development and `crictl`
-  compatibility checks.
-- `containerization`: an experimental backend that uses Apple `Containerization`
-  and `LinuxPod` for the real Linux pod/container execution path.
+The main demo is:
 
-See [docs/architecture.md](docs/architecture.md) for the planned node/cluster
-architecture, CRI mapping, networking strategy, and roadmap toward k3s/kubelet
-integration.
+```bash
+Scripts/smoke-k3s-single-node.sh
+```
 
-See [docs/poc.md](docs/poc.md) for the verified PoC commands and evidence.
+It builds a single-node k3s setup where:
 
-## What Works Now
+1. `krust-cri` runs on the macOS host.
+2. k3s runs inside an Apple `LinuxPod`.
+3. the k3s kubelet reaches the host CRI socket through Apple socket relay.
+4. `kubectl` creates pods.
+5. the smoke verifies pod-to-pod networking, logs, exit status, restart behavior,
+   live stats, and log reopen.
 
-- Official CRI protobuf/service names from Kubernetes `runtime.v1`.
-- Unix socket gRPC server.
-- `Version` and `Status`.
-- Pod sandbox create/stop/remove/status/list/stream.
-- Container create/start/stop/remove/status/list/stream.
-- Image pull/list/status/remove using local runtime state.
-- Basic container stats responses.
-- Persistent JSON state under `--state-dir`.
-- Experimental `--backend containerization` bridge to Apple `Containerization`
-  and `LinuxPod`.
-- End-to-end `crictl` smoke test for the Apple backend:
-  `pull -> runp -> create -> start -> inspect -> stop -> rm`.
-- Focused `critest` smoke test for the CRI contract covered by the current MVP:
-  runtime info, pod sandbox lifecycle, container lifecycle, and idempotence.
-- Same-node pod-to-pod network smoke test through Apple `VmnetNetwork` when the
-  signed development binary is run from `/private/tmp`.
-- Kubelet static-pod smoke path using a Linux kubelet inside an Apple
-  `LinuxPod` with the host `krust-cri` socket relayed into the guest.
-- Single-node k3s server smoke path using a Linux k3s binary inside an Apple
-  `LinuxPod`; the node registers with `CONTAINER-RUNTIME=krust-cri://0.1.0-mvp`,
-  Kubernetes creates two pods, and the client pod reaches the server pod by
-  direct pod IP.
-- Kubelet-visible termination status for non-zero container exits, including
-  exit code, `Error` reason, and message.
-- Basic kubelet `restartPolicy: OnFailure` behavior: k3s observes the failed
-  container last state and starts a replacement container, reaching
-  `CrashLoopBackOff` instead of runtime create/start errors.
-- `ReopenContainerLog` validates the target container and reopens CRI log files,
-  including live Apple backend stdout/stderr writers after log rotation.
-- `ContainerStats` for live Apple backend containers maps CPU and memory usage
-  from `LinuxPod.statistics`.
+Expected successful output includes lines like:
 
-Streaming exec, attach, port-forward, checkpoint, events, and deeper stats are
-intentionally minimal in the state-backed MVP backend.
+```text
+krust-macos   Ready   ...   krust-cri://0.1.0-mvp
+hello-from-k3s-pod-a
+OnFailure restart verified: restartCount=1
+container stats verified: cpuCoreNs=... memoryBytes=...
+live log reopen after rotation verified
+k3s single-node krust-cri pod-to-pod smoke test complete
+```
 
-The Apple backend can run the MVP lifecycle without VM networking and reports
-`NetworkReady=false` when `VmnetNetwork` is unavailable. On the verified macOS
-26 development path, the smoke script copies and signs the binary under
-`/private/tmp`, `VmnetNetwork` initializes, and direct pod-to-pod traffic works
-through the vmnet pod IP reported by CRI.
+See [docs/poc.md](docs/poc.md) for the full demo flow, local asset requirements,
+and the evidence this proves.
 
-## Roadmap
+## Requirements
 
-Short version: make the CRI surface honest first, then deepen the Apple backend.
+- Apple silicon Mac.
+- macOS 26 and Xcode 26 for Apple Containerization.
+- SwiftPM.
+- `kubectl`.
+- `jq`.
+- Local cri-tools binaries under `.local/bin`, including `crictl`.
+- Linux arm64 k3s binary at `.local/bin/k3s-linux-arm64`.
+- Apple Containerization kernel at `containerization/bin/vmlinux`.
+- `vminit:latest` available in the local Apple Containerization image store.
 
-1. MVP proof, now: prove the daemon can speak CRI and run the basic
-   `crictl` pod/container lifecycle through Apple Containerization.
-2. Runtime correctness: map container exit state, errors, logs, and stats back
-   into CRI more accurately.
-3. Networking: harden the current vmnet pod-to-pod PoC, then add DNS, port
-   mappings, service networking, and multi-node routing deliberately.
-4. Kubelet/k3s path, now proven as PoC: keep closing the missing CRI semantics
-   kubelet expects, especially log reopen, restart behavior, and richer stats.
-5. Developer experience: package assets, signing, config, smoke tests, and
-   diagnostics into a repeatable local setup.
+Some local vmnet development flows require the runnable binaries to be copied
+and signed under `/private/tmp`; the smoke scripts handle that.
 
 ## Build
 
 ```bash
 Scripts/generate-protos.sh
+
 env CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
   SWIFTPM_CACHE_PATH="$PWD/.build/swiftpm-cache" \
   swift build --cache-path "$PWD/.build/swiftpm-cache"
 ```
 
-## Run
+Run unit tests:
 
-State-backed backend for CRI conformance smoke tests:
+```bash
+env CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
+  SWIFTPM_CACHE_PATH="$PWD/.build/swiftpm-cache" \
+  swift test --cache-path "$PWD/.build/swiftpm-cache"
+```
+
+## Run Manually
+
+State-only backend for quick CRI API checks:
 
 ```bash
 .build/debug/krust-cri \
@@ -137,20 +137,16 @@ Scripts/sign-krust-cri.sh
   --containerization-root "$HOME/Library/Application Support/com.apple.containerization"
 ```
 
-With `crictl` installed:
+Then point `crictl` at the socket:
 
 ```bash
-crictl --runtime-endpoint unix:///tmp/krust-cri.sock version
 crictl --runtime-endpoint unix:///tmp/krust-cri.sock info
-crictl --runtime-endpoint unix:///tmp/krust-cri.sock pull docker.io/library/alpine:3.20
 crictl --runtime-endpoint unix:///tmp/krust-cri.sock images
 ```
 
-Run the smoke scripts after building. The Containerization scripts also require
-the prepared kernel and init image:
+## Other Smoke Tests
 
 ```bash
-Scripts/smoke-kubelet-cri-surface.sh
 Scripts/smoke-critest-basic.sh
 Scripts/smoke-containerization-backend.sh
 Scripts/smoke-containerization-network.sh
@@ -158,18 +154,43 @@ Scripts/smoke-kubelet-static-pods.sh
 Scripts/smoke-k3s-single-node.sh
 ```
 
-`smoke-critest-basic.sh` expects `critest` from the matching cri-tools release
-in `.local/bin`.
+`Scripts/smoke-k3s-single-node.sh` is the most useful end-to-end demo for
+people evaluating the project.
 
-## Open Gaps
+## Project Layout
 
-Harden the Apple Containerization backend beyond the MVP demo:
+- `Sources/KrustCRI`: CRI server, runtime state, image service, and backends.
+- `Sources/KrustKubeletPod`: helper for running kubelet/k3s inside an Apple
+  `LinuxPod`.
+- `Protos/runtime/v1`: Kubernetes CRI protobuf definitions.
+- `Scripts`: build, signing, and smoke-test helpers.
+- `docs`: architecture and proof-of-concept notes.
+- `research`: focused API research notes, including Apple hotplug limitations.
+- `containerization`: Apple Containerization checkout/submodule.
 
-- Harden vmnet packaging/signing beyond the `/private/tmp` development smoke
-  path.
-- Add DNS, port mappings, service networking, and multi-node routing.
-- Harden restart policy behavior beyond the current single-container OnFailure
-  smoke path, especially multi-container pods and long-running sidecars.
-- Broaden stats beyond live container CPU/memory and improve pod sandbox stats.
-- Add broader `kubectl logs` smoke coverage around log rotation and improve
-  Kubernetes status fidelity.
+## Roadmap
+
+The next valuable milestones are:
+
+- make DNS work for normal k3s pods,
+- add a minimal service-networking story,
+- implement port mappings,
+- broaden stats and pod sandbox stats,
+- harden multi-container restart behavior,
+- package signing/setup into a repeatable open-source developer flow.
+
+Live post-create `LinuxPod.addContainer` hotplug is not a committed MVP path.
+Current research did not find a public Virtualization.framework runtime virtio
+block attach API or a public Apple Containerization `HotplugProvider`
+implementation. See
+[research/virtualization-hotplug-2026-06-14.md](research/virtualization-hotplug-2026-06-14.md).
+
+## Contributing
+
+Contributions should keep the project evidence-driven:
+
+- prefer small CRI behavior improvements with smoke coverage,
+- keep macOS/Apple API assumptions documented,
+- run `swift test` before sending changes,
+- use the k3s smoke when touching kubelet-facing lifecycle, logs, stats, or
+  networking behavior.
