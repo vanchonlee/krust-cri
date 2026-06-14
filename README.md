@@ -25,6 +25,13 @@ macOS host
 
 This is a proof of concept, not a production Kubernetes runtime.
 
+What Kubernetes sees:
+
+```text
+NAME          STATUS   ROLES    AGE   VERSION        INTERNAL-IP    EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION   CONTAINER-RUNTIME
+krust-macos   Ready    <none>   0s    v1.35.0+k3s1   192.168.65.2   <none>        Debian GNU/Linux 12 (bookworm)   6.12.28          krust-cri://0.1.0-mvp
+```
+
 ![krust-cri architecture](docs/assets/krust-cri-architecture.svg)
 
 ## How It Differs From Lima
