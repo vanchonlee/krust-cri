@@ -3,6 +3,8 @@
 `krust-cri` is an experimental Kubernetes Container Runtime Interface (CRI)
 runtime for macOS.
 
+<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/5e74f843-45fb-48f1-9573-d72f3db0cacb" />
+
 It exposes the official Kubernetes `runtime.v1` CRI API over a Unix socket and
 runs Linux workloads through Apple's open-source
 [Containerization](https://github.com/apple/containerization) package and
