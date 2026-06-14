@@ -32,8 +32,6 @@ NAME          STATUS   ROLES    AGE   VERSION        INTERNAL-IP    EXTERNAL-IP 
 krust-macos   Ready    <none>   0s    v1.35.0+k3s1   192.168.65.2   <none>        Debian GNU/Linux 12 (bookworm)   6.12.28          krust-cri://0.1.0-mvp
 ```
 
-![krust-cri architecture](docs/assets/krust-cri-architecture.svg)
-
 ## How It Differs From Lima
 
 Lima launches Linux virtual machines. You can run containerd, Docker, k3s, or
@@ -116,9 +114,6 @@ krust-k3s-server       1/1     Running     0            16s   192.168.64.2   kru
 
 k3s single-node krust-cri pod-to-pod smoke test complete
 ```
-
-See [docs/poc.md](docs/poc.md) for the full demo flow, local asset requirements,
-and the evidence this proves.
 
 ## Requirements
 
@@ -206,7 +201,6 @@ people evaluating the project.
   `LinuxPod`.
 - `Protos/runtime/v1`: Kubernetes CRI protobuf definitions.
 - `Scripts`: build, signing, and smoke-test helpers.
-- `docs`: architecture and proof-of-concept notes.
 - `containerization`: Apple Containerization checkout/submodule.
 
 ## Roadmap
