@@ -181,8 +181,7 @@ Known gaps:
   and RuntimeClass are not production-ready.
 - Live post-create `LinuxPod.addContainer` hotplug is not a committed MVP path.
   Current public API research did not find a supported runtime virtio block
-  attach path. See
-  `research/virtualization-hotplug-2026-06-14.md`.
+  attach path for the Apple Containerization VZ backend.
 
 ## Next Demo Milestones
 

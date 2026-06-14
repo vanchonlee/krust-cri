@@ -207,7 +207,6 @@ people evaluating the project.
 - `Protos/runtime/v1`: Kubernetes CRI protobuf definitions.
 - `Scripts`: build, signing, and smoke-test helpers.
 - `docs`: architecture and proof-of-concept notes.
-- `research`: focused API research notes, including Apple hotplug limitations.
 - `containerization`: Apple Containerization checkout/submodule.
 
 ## Roadmap
@@ -222,10 +221,8 @@ The next valuable milestones are:
 - package signing/setup into a repeatable open-source developer flow.
 
 Live post-create `LinuxPod.addContainer` hotplug is not a committed MVP path.
-Current research did not find a public Virtualization.framework runtime virtio
-block attach API or a public Apple Containerization `HotplugProvider`
-implementation. See
-[research/virtualization-hotplug-2026-06-14.md](research/virtualization-hotplug-2026-06-14.md).
+Current public API review did not find a supported runtime virtio block attach
+path for the Apple Containerization VZ backend.
 
 ## Contributing
 

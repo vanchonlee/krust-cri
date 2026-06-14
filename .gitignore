@@ -4,5 +4,6 @@
 .tmp/
 DerivedData/
 .DS_Store
+/research/
 *.sock
 *.log
