@@ -57,38 +57,52 @@ vmnet development is sensitive to signing and execution location.
 
 ## Expected Output
 
-A successful run includes output like:
+A recent successful run:
 
 ```text
+/private/tmp/krust-cri-k3s-smoke: replacing existing signature
+/private/tmp/krust-cri-k3s-smoke: valid on disk
+/private/tmp/krust-cri-k3s-smoke: satisfies its Designated Requirement
+/private/tmp/krust-k3s-pod-smoke-bin: replacing existing signature
+/private/tmp/krust-k3s-pod-smoke-bin: valid on disk
+/private/tmp/krust-k3s-pod-smoke-bin: satisfies its Designated Requirement
 ==> CRI status must report vmnet ready
 ==> Start single-node k3s server with relayed krust-cri socket
+==> Wait for k3s kubeconfig
+==> Wait for k3s API and node registration
 
-NAME          STATUS   VERSION        CONTAINER-RUNTIME
-krust-macos   Ready    v1.35.0+k3s1   krust-cri://0.1.0-mvp
+NAME          STATUS   ROLES    AGE   VERSION        INTERNAL-IP    EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION   CONTAINER-RUNTIME
+krust-macos   Ready    <none>   0s    v1.35.0+k3s1   192.168.65.2   <none>        Debian GNU/Linux 12 (bookworm)   6.12.28          krust-cri://0.1.0-mvp
 
+==> Wait for default service account
+==> Create server pod via k3s API
+pod/krust-k3s-server created
+==> Wait for server pod IP
 server pod ip=192.168.64.2
+==> Create client pod and test direct pod IP
+pod/krust-k3s-client created
 hello-from-k3s-pod-a
 
 ==> Verify failed container termination status
+pod/krust-k3s-fail created
 ==> Verify kubelet OnFailure restart behavior
+pod/krust-k3s-restart created
 OnFailure restart verified: restartCount=1
 
 ==> Verify live container log reopen after rotation
+pod/krust-k3s-log-writer created
 ==> Verify live container stats
-container stats verified: cpuCoreNs=... memoryBytes=...
+container stats verified: cpuCoreNs=8709000 memoryBytes=5890048
+INFO[0000] Container logs reopened
 live log reopen after rotation verified
 
+NAME                   READY   STATUS      RESTARTS     AGE   IP             NODE          NOMINATED NODE   READINESS GATES
+krust-k3s-client       0/1     Completed   0            14s   192.168.64.3   krust-macos   <none>           <none>
+krust-k3s-fail         0/1     Error       0            10s   192.168.64.4   krust-macos   <none>           <none>
+krust-k3s-log-writer   1/1     Running     0            4s    192.168.64.6   krust-macos   <none>           <none>
+krust-k3s-restart      0/1     Error       1 (6s ago)   7s    192.168.64.5   krust-macos   <none>           <none>
+krust-k3s-server       1/1     Running     0            16s   192.168.64.2   krust-macos   <none>           <none>
 k3s single-node krust-cri pod-to-pod smoke test complete
-```
-
-At the end, `kubectl get pods -o wide` should show a small set of proof pods:
-
-```text
-krust-k3s-client       Completed
-krust-k3s-fail         Error
-krust-k3s-log-writer   Running
-krust-k3s-restart      CrashLoopBackOff
-krust-k3s-server       Running
 ```
 
 ## What This Proves

@@ -4,6 +4,12 @@
 macOS. Its goal is to let kubelet or k3s operate Kubernetes nodes backed by
 macOS and Apple's native virtualization/container APIs.
 
+The project is intentionally different from Lima-style VM management. Lima gives
+users Linux machines and lets containerd, Docker, k3s, or other software run
+inside those machines. `krust-cri` sits at the Kubernetes CRI boundary: kubelet
+calls a macOS-hosted runtime socket, and that runtime translates Kubernetes pod
+and container lifecycle requests into Apple Containerization operations.
+
 The current PoC has verified a single-node model: k3s server runs inside an
 Apple `LinuxPod`, its kubelet reaches the `krust-cri` Unix socket relayed from
 the macOS host, and workload pods run through Apple Containerization with
@@ -12,6 +18,8 @@ same-node direct pod-to-pod networking.
 The project should stay intentionally narrow: a CRI adapter, state machine, and
 Apple Containerization backend. It should not become a general Docker-compatible
 runtime or a full containerd clone.
+
+![krust-cri architecture](assets/krust-cri-architecture.svg)
 
 ## Goals
 
@@ -27,6 +35,7 @@ runtime or a full containerd clone.
 ## Non-goals
 
 - Reimplement containerd.
+- Become a general Linux VM manager like Lima.
 - Provide a Docker-compatible API.
 - Support every Linux CNI, namespace, security, and host networking behavior in
   the first versions.

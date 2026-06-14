@@ -8,6 +8,11 @@ runs Linux workloads through Apple's open-source
 [Containerization](https://github.com/apple/containerization) package and
 `Virtualization.framework`.
 
+The important distinction: tools like Lima, Colima, and Docker Desktop give you
+a Linux machine or a Linux container engine on macOS. `krust-cri` is testing a
+different boundary. It asks whether kubelet can talk directly to a macOS-hosted
+CRI runtime, with that runtime driving Apple Containerization underneath.
+
 The current demo path is intentionally simple:
 
 ```text
@@ -19,6 +24,26 @@ macOS host
 ```
 
 This is a proof of concept, not a production Kubernetes runtime.
+
+![krust-cri architecture](docs/assets/krust-cri-architecture.svg)
+
+## How It Differs From Lima
+
+Lima launches Linux virtual machines. You can run containerd, Docker, k3s, or
+other Linux software inside those VMs.
+
+`krust-cri` is not a VM manager and does not try to replace Lima. Its focus is
+the Kubernetes runtime contract:
+
+```text
+kubelet
+  -> CRI runtime.v1 socket
+  -> krust-cri on macOS
+  -> Apple Containerization / LinuxPod
+```
+
+That means the interesting part of this project is not "can macOS run a Linux
+VM?" It is "can macOS host the CRI runtime that kubelet expects?"
 
 ## Current Status
 
@@ -64,14 +89,24 @@ It builds a single-node k3s setup where:
 5. the smoke verifies pod-to-pod networking, logs, exit status, restart behavior,
    live stats, and log reopen.
 
-Expected successful output includes lines like:
+Recent successful output:
 
 ```text
-krust-macos   Ready   ...   krust-cri://0.1.0-mvp
+NAME          STATUS   ROLES    AGE   VERSION        INTERNAL-IP    EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION   CONTAINER-RUNTIME
+krust-macos   Ready    <none>   0s    v1.35.0+k3s1   192.168.65.2   <none>        Debian GNU/Linux 12 (bookworm)   6.12.28          krust-cri://0.1.0-mvp
+
 hello-from-k3s-pod-a
 OnFailure restart verified: restartCount=1
-container stats verified: cpuCoreNs=... memoryBytes=...
+container stats verified: cpuCoreNs=8709000 memoryBytes=5890048
 live log reopen after rotation verified
+
+NAME                   READY   STATUS      RESTARTS     AGE   IP             NODE
+krust-k3s-client       0/1     Completed   0            14s   192.168.64.3   krust-macos
+krust-k3s-fail         0/1     Error       0            10s   192.168.64.4   krust-macos
+krust-k3s-log-writer   1/1     Running     0            4s    192.168.64.6   krust-macos
+krust-k3s-restart      0/1     Error       1 (6s ago)   7s    192.168.64.5   krust-macos
+krust-k3s-server       1/1     Running     0            16s   192.168.64.2   krust-macos
+
 k3s single-node krust-cri pod-to-pod smoke test complete
 ```
 
