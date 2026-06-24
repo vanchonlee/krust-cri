@@ -72,11 +72,14 @@ Verified on the local development path:
   Containerization `LinuxPod` resolv.conf setup.
 - CRI sandbox port mappings are persisted and exposed in verbose sandbox status
   metadata for future host-port relay work.
+- CRI `PortForward` validates sandbox requests and returns a deterministic
+  streaming endpoint URL for future relay implementation.
 
 Still missing or incomplete:
 
 - Kubernetes DNS/service-name resolution and service networking.
-- Host-port forwarding/relay and multi-node pod routing.
+- Port-forward stream handling, host-port forwarding/relay, and multi-node pod
+  routing.
 - Broader resource accounting beyond container and pod sandbox CPU/memory.
 - Multi-container/sidecar restart hardening.
 - Daemon restart recovery, orphan cleanup, GC, volumes, security context, and
