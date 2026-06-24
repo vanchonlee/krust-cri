@@ -24,6 +24,125 @@ struct SandboxRecord: Codable, Sendable {
     var createdAt: Int64
     var phase: SandboxPhase
     var ip: String
+    var dnsConfig: SandboxDNSConfig? = nil
+    var portMappings: [SandboxPortMapping] = []
+
+    init(
+        id: String,
+        name: String,
+        namespace: String,
+        attempt: UInt32,
+        uid: String,
+        labels: [String: String],
+        annotations: [String: String],
+        runtimeHandler: String,
+        logDirectory: String,
+        createdAt: Int64,
+        phase: SandboxPhase,
+        ip: String,
+        dnsConfig: SandboxDNSConfig? = nil,
+        portMappings: [SandboxPortMapping] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.namespace = namespace
+        self.attempt = attempt
+        self.uid = uid
+        self.labels = labels
+        self.annotations = annotations
+        self.runtimeHandler = runtimeHandler
+        self.logDirectory = logDirectory
+        self.createdAt = createdAt
+        self.phase = phase
+        self.ip = ip
+        self.dnsConfig = dnsConfig
+        self.portMappings = portMappings
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(String.self, forKey: .id),
+            name: try values.decode(String.self, forKey: .name),
+            namespace: try values.decode(String.self, forKey: .namespace),
+            attempt: try values.decode(UInt32.self, forKey: .attempt),
+            uid: try values.decode(String.self, forKey: .uid),
+            labels: try values.decode([String: String].self, forKey: .labels),
+            annotations: try values.decode([String: String].self, forKey: .annotations),
+            runtimeHandler: try values.decode(String.self, forKey: .runtimeHandler),
+            logDirectory: try values.decode(String.self, forKey: .logDirectory),
+            createdAt: try values.decode(Int64.self, forKey: .createdAt),
+            phase: try values.decode(SandboxPhase.self, forKey: .phase),
+            ip: try values.decode(String.self, forKey: .ip),
+            dnsConfig: try values.decodeIfPresent(SandboxDNSConfig.self, forKey: .dnsConfig),
+            portMappings: try values.decodeIfPresent([SandboxPortMapping].self, forKey: .portMappings) ?? []
+        )
+    }
+}
+
+struct SandboxDNSConfig: Codable, Equatable, Sendable {
+    var servers: [String]
+    var searches: [String]
+    var options: [String]
+
+    init(servers: [String], searches: [String], options: [String]) {
+        self.servers = servers
+        self.searches = searches
+        self.options = options
+    }
+
+    init?(cri: Runtime_V1_DNSConfig) {
+        guard !cri.servers.isEmpty || !cri.searches.isEmpty || !cri.options.isEmpty else {
+            return nil
+        }
+        self.init(servers: cri.servers, searches: cri.searches, options: cri.options)
+    }
+
+    var resolvConf: String {
+        var lines: [String] = []
+        lines.append(contentsOf: servers.map { "nameserver \($0)" })
+        if !searches.isEmpty {
+            lines.append("search \(searches.joined(separator: " "))")
+        }
+        if !options.isEmpty {
+            lines.append("options \(options.joined(separator: " "))")
+        }
+        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    }
+}
+
+struct SandboxPortMapping: Codable, Equatable, Sendable {
+    var `protocol`: String
+    var containerPort: Int32
+    var hostPort: Int32
+    var hostIP: String
+
+    init(protocol: String, containerPort: Int32, hostPort: Int32, hostIP: String) {
+        self.protocol = `protocol`
+        self.containerPort = containerPort
+        self.hostPort = hostPort
+        self.hostIP = hostIP
+    }
+
+    init(cri: Runtime_V1_PortMapping) {
+        self.init(
+            protocol: cri.protocol.krustName,
+            containerPort: cri.containerPort,
+            hostPort: cri.hostPort,
+            hostIP: cri.hostIp
+        )
+    }
+}
+
+extension Runtime_V1_Protocol {
+    var krustName: String {
+        switch self {
+        case .tcp: return "tcp"
+        case .udp: return "udp"
+        case .sctp: return "sctp"
+        case .UNRECOGNIZED(let value): return "unknown-\(value)"
+        }
+    }
 }
 
 struct ContainerRecord: Codable, Sendable {
