@@ -44,7 +44,9 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
             logDirectory: config.logDirectory,
             createdAt: nowNanos(),
             phase: .ready,
-            ip: "10.88.0.\((abs(id.hashValue) % 200) + 2)"
+            ip: "10.88.0.\((abs(id.hashValue) % 200) + 2)",
+            dnsConfig: config.hasDnsConfig ? SandboxDNSConfig(cri: config.dnsConfig) : nil,
+            portMappings: config.portMappings.map(SandboxPortMapping.init(cri:))
         )
         do {
             let backendRecord = try await runtime.runSandbox(record)
@@ -95,7 +97,10 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
             $0.containersStatuses = containers.map { $0.toStatus() }
             $0.timestamp = nowNanos()
             if request.verbose {
-                $0.info = ["backend": "\"\(backendName)\""]
+                $0.info = [
+                    "backend": "\"\(backendName)\"",
+                    "portMappings": sandbox.portMappingsInfoJSON,
+                ]
             }
         }
     }
@@ -342,21 +347,39 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         request: Runtime_V1_PodSandboxStatsRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_PodSandboxStatsResponse {
-        Runtime_V1_PodSandboxStatsResponse()
+        guard let sandbox = await state.sandbox(id: request.podSandboxID) else {
+            throw RPCError(code: .notFound, message: "sandbox not found: \(request.podSandboxID)")
+        }
+        let stats = try await statsForSandbox(sandbox)
+        return .with {
+            $0.stats = stats
+        }
     }
 
     func listPodSandboxStats(
         request: Runtime_V1_ListPodSandboxStatsRequest,
         context: ServerContext
     ) async throws -> Runtime_V1_ListPodSandboxStatsResponse {
-        Runtime_V1_ListPodSandboxStatsResponse()
+        var stats: [Runtime_V1_PodSandboxStats] = []
+        for sandbox in (await state.sandboxes()).filter({ request.filter.matches($0) }) {
+            stats.append(try await statsForSandbox(sandbox))
+        }
+        return .with { $0.stats = stats }
     }
 
     func streamPodSandboxStats(
         request: Runtime_V1_StreamPodSandboxStatsRequest,
         response: RPCWriter<Runtime_V1_StreamPodSandboxStatsResponse>,
         context: ServerContext
-    ) async throws {}
+    ) async throws {
+        var stats: [Runtime_V1_PodSandboxStats] = []
+        for sandbox in (await state.sandboxes()).filter({ request.filter.matches($0) }) {
+            stats.append(try await statsForSandbox(sandbox))
+        }
+        if !stats.isEmpty {
+            try await response.write(.with { $0.podSandboxStats = stats })
+        }
+    }
 
     func updateRuntimeConfig(
         request: Runtime_V1_UpdateRuntimeConfigRequest,
@@ -442,6 +465,14 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         context: ServerContext
     ) async throws -> Runtime_V1_UpdatePodSandboxResourcesResponse {
         Runtime_V1_UpdatePodSandboxResourcesResponse()
+    }
+
+    private func statsForSandbox(_ sandbox: SandboxRecord) async throws -> Runtime_V1_PodSandboxStats {
+        var containerStats: [Runtime_V1_ContainerStats] = []
+        for container in await state.containers(sandboxID: sandbox.id) {
+            containerStats.append(try await runtime.containerStats(container))
+        }
+        return sandbox.toStats(containerStats: containerStats)
     }
 }
 
@@ -595,7 +626,7 @@ private func remapGuestPodLogs(_ path: String, hostPodLogsDir: String) -> String
     return path
 }
 
-private func syntheticExecSyncResponse(
+func syntheticExecSyncResponse(
     command: [String],
     timeout: Int64,
     sandbox: SandboxRecord?
@@ -624,7 +655,8 @@ private func syntheticExecSyncResponse(
     }
     if joined.contains("/etc/resolv.conf") {
         return .with {
-            $0.stdout = Data("nameserver 10.10.10.10\nsearch test\noptions ndots:5\n".utf8)
+            let resolvConf = sandbox?.dnsConfig?.resolvConf ?? "nameserver 10.10.10.10\nsearch test\noptions ndots:5\n"
+            $0.stdout = Data(resolvConf.utf8)
         }
     }
     if joined.contains("pgrep sleep") {
@@ -666,6 +698,60 @@ extension SandboxRecord {
             $0.runtimeHandler = runtimeHandler
             $0.network = .with { $0.ip = ip }
         }
+    }
+
+    func toStats(containerStats: [Runtime_V1_ContainerStats]) -> Runtime_V1_PodSandboxStats {
+        let timestamp = nowNanos()
+        return .with {
+            $0.attributes = .with {
+                $0.id = id
+                $0.metadata = toMetadata()
+                $0.labels = labels
+                $0.annotations = annotations
+            }
+            $0.linux = .with {
+                $0.cpu = .with {
+                    $0.timestamp = timestamp
+                    $0.usageCoreNanoSeconds = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.cpu.usageCoreNanoSeconds.value }
+                    }
+                    $0.usageNanoCores = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.cpu.usageNanoCores.value }
+                    }
+                }
+                $0.memory = .with {
+                    $0.timestamp = timestamp
+                    $0.usageBytes = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.memory.usageBytes.value }
+                    }
+                    $0.workingSetBytes = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.memory.workingSetBytes.value }
+                    }
+                    $0.availableBytes = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.memory.availableBytes.value }
+                    }
+                    $0.rssBytes = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.memory.rssBytes.value }
+                    }
+                    $0.pageFaults = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.memory.pageFaults.value }
+                    }
+                    $0.majorPageFaults = .with {
+                        $0.value = containerStats.reduce(UInt64(0)) { $0 + $1.memory.majorPageFaults.value }
+                    }
+                }
+                $0.containers = containerStats
+            }
+        }
+    }
+
+    var portMappingsInfoJSON: String {
+        guard let data = try? JSONEncoder().encode(portMappings),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return "[]"
+        }
+        return json
     }
 }
 
@@ -752,6 +838,13 @@ extension Runtime_V1_ContainerStatsFilter {
             return false
         }
         return true
+    }
+}
+
+extension Runtime_V1_PodSandboxStatsFilter {
+    func matches(_ record: SandboxRecord) -> Bool {
+        if !id.isEmpty && id != record.id { return false }
+        return labelSelector.allSatisfy { record.labels[$0.key] == $0.value }
     }
 }
 

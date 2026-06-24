@@ -66,12 +66,18 @@ Verified on the local development path:
   runtime create/start errors.
 - Live Apple backend `ContainerStats` returns CPU and memory usage from
   `LinuxPod.statistics`.
+- Pod sandbox stats aggregate per-container CPU and memory usage for CRI
+  `PodSandboxStats`, `ListPodSandboxStats`, and `StreamPodSandboxStats`.
+- CRI sandbox DNS config is persisted and passed through to Apple
+  Containerization `LinuxPod` resolv.conf setup.
+- CRI sandbox port mappings are persisted and exposed in verbose sandbox status
+  metadata for future host-port relay work.
 
 Still missing or incomplete:
 
-- DNS and Kubernetes service networking.
-- Port mappings and multi-node pod routing.
-- Full pod sandbox stats and broader resource accounting.
+- Kubernetes DNS/service-name resolution and service networking.
+- Host-port forwarding/relay and multi-node pod routing.
+- Broader resource accounting beyond container and pod sandbox CPU/memory.
 - Multi-container/sidecar restart hardening.
 - Daemon restart recovery, orphan cleanup, GC, volumes, security context, and
   RuntimeClass behavior.

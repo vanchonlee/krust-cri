@@ -228,6 +228,9 @@ actor ContainerizationRuntimeBackend: ContainerRuntimeBackend {
             config.memoryInBytes = 1024 * 1024 * 1024
             config.interfaces = interfaces
             config.hostname = record.name.isEmpty ? nil : record.name
+            if let dnsConfig = record.dnsConfig {
+                config.dns = dnsConfig.toContainerizationDNS()
+            }
             config.bootLog = BootLog.file(path: podPath.appendingPathComponent("boot.log"))
         }
     }
@@ -287,6 +290,16 @@ private enum RuntimeBackendError: Error, CustomStringConvertible {
         switch self {
         case .notFound(let message): return message
         }
+    }
+}
+
+private extension SandboxDNSConfig {
+    func toContainerizationDNS() -> DNS {
+        DNS(
+            nameservers: servers,
+            searchDomains: searches,
+            options: options
+        )
     }
 }
 
