@@ -304,14 +304,15 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
     }
 
     func portForward(request: Runtime_V1_PortForwardRequest, context: ServerContext) async throws -> Runtime_V1_PortForwardResponse {
-        guard await state.sandbox(id: request.podSandboxID) != nil else {
+        guard let sandbox = await state.sandbox(id: request.podSandboxID) else {
             throw RPCError(code: .notFound, message: "sandbox not found: \(request.podSandboxID)")
         }
-        guard !request.port.isEmpty else {
-            throw RPCError(code: .invalidArgument, message: "PortForward requires at least one port")
+        let ports = resolvedPortForwardPorts(requestedPorts: request.port, sandbox: sandbox)
+        guard !ports.isEmpty else {
+            throw RPCError(code: .invalidArgument, message: "PortForward requires at least one requested or mapped port")
         }
         return .with {
-            $0.url = makePortForwardURL(podSandboxID: request.podSandboxID, ports: request.port)
+            $0.url = makePortForwardURL(podSandboxID: request.podSandboxID, ports: ports)
         }
     }
 
@@ -640,6 +641,11 @@ func makePortForwardURL(podSandboxID: String, ports: [Int32]) -> String {
     let encodedSandboxID = podSandboxID.addingPercentEncoding(withAllowedCharacters: allowedPathComponentCharacters) ?? podSandboxID
     let encodedPorts = Array(Set(ports)).sorted().map(String.init).joined(separator: ",")
     return "krust-cri://portforward/\(encodedSandboxID)?ports=\(encodedPorts)"
+}
+
+func resolvedPortForwardPorts(requestedPorts: [Int32], sandbox: SandboxRecord) -> [Int32] {
+    let ports = requestedPorts.isEmpty ? sandbox.portMappings.map(\.containerPort) : requestedPorts
+    return Array(Set(ports)).sorted()
 }
 
 func syntheticExecSyncResponse(
