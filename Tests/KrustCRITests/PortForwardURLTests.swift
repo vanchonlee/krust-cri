@@ -3,21 +3,47 @@ import XCTest
 
 final class PortForwardURLTests: XCTestCase {
     func testPortForwardURLIncludesSandboxAndSortedPorts() {
-        let url = makePortForwardURL(podSandboxID: "pod-test", ports: [443, 80])
+        let url = makePortForwardURL(
+            podSandboxID: "pod-test",
+            targetHost: "10.88.0.2",
+            ports: [443, 80],
+            streamBaseURL: "http://127.0.0.1:10443"
+        )
 
-        XCTAssertEqual(url, "krust-cri://portforward/pod-test?ports=80,443")
+        XCTAssertEqual(url, "http://127.0.0.1:10443/portforward/pod-test?ports=80,443&target=10.88.0.2")
     }
 
     func testPortForwardURLEncodesSandboxID() {
-        let url = makePortForwardURL(podSandboxID: "pod/test id", ports: [8080])
+        let url = makePortForwardURL(
+            podSandboxID: "pod/test id",
+            targetHost: "fd00::10",
+            ports: [8080],
+            streamBaseURL: "http://127.0.0.1:10443/cri"
+        )
 
-        XCTAssertEqual(url, "krust-cri://portforward/pod%2Ftest%20id?ports=8080")
+        XCTAssertEqual(url, "http://127.0.0.1:10443/cri/portforward/pod%2Ftest%20id?ports=8080&target=fd00::10")
     }
 
     func testPortForwardURLDropsDuplicatePorts() {
-        let url = makePortForwardURL(podSandboxID: "pod-test", ports: [8080, 8080, 80])
+        let url = makePortForwardURL(
+            podSandboxID: "pod-test",
+            targetHost: "10.88.0.2",
+            ports: [8080, 8080, 80],
+            streamBaseURL: "http://127.0.0.1:10443/"
+        )
 
-        XCTAssertEqual(url, "krust-cri://portforward/pod-test?ports=80,8080")
+        XCTAssertEqual(url, "http://127.0.0.1:10443/portforward/pod-test?ports=80,8080&target=10.88.0.2")
+    }
+
+    func testPortForwardURLFallsBackToLegacySchemeWhenBridgeIsNotConfigured() {
+        let url = makePortForwardURL(
+            podSandboxID: "pod-test",
+            targetHost: "10.88.0.2",
+            ports: [8080],
+            streamBaseURL: ""
+        )
+
+        XCTAssertEqual(url, "krust-cri://portforward/pod-test?ports=8080&target=10.88.0.2")
     }
 
     func testPortForwardFallsBackToSandboxPortMappingsWhenRequestPortsAreEmpty() {

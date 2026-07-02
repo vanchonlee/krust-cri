@@ -3,6 +3,7 @@
 .swiftpm/
 .tmp/
 DerivedData/
+crates/*/target/
 .DS_Store
 /research/
 /docs/
