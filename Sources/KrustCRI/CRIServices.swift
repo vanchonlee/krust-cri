@@ -11,6 +11,7 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
     let backendName: String
     let cgroupDriver: Runtime_V1_CgroupDriver
     let hostPodLogsDir: String
+    let portForwardStreamBaseURL: String
     let logger: Logger
 
     func version(
@@ -311,8 +312,16 @@ struct CRIRuntimeService: Runtime_V1_RuntimeService.SimpleServiceProtocol {
         guard !ports.isEmpty else {
             throw RPCError(code: .invalidArgument, message: "PortForward requires at least one requested or mapped port")
         }
+        guard !sandbox.ip.isEmpty else {
+            throw RPCError(code: .failedPrecondition, message: "PortForward requires a sandbox IP")
+        }
         return .with {
-            $0.url = makePortForwardURL(podSandboxID: request.podSandboxID, ports: ports)
+            $0.url = makePortForwardURL(
+                podSandboxID: request.podSandboxID,
+                targetHost: sandbox.ip,
+                ports: ports,
+                streamBaseURL: portForwardStreamBaseURL
+            )
         }
     }
 
@@ -635,12 +644,25 @@ private func remapGuestPodLogs(_ path: String, hostPodLogsDir: String) -> String
     return path
 }
 
-func makePortForwardURL(podSandboxID: String, ports: [Int32]) -> String {
+func makePortForwardURL(
+    podSandboxID: String,
+    targetHost: String,
+    ports: [Int32],
+    streamBaseURL: String
+) -> String {
     var allowedPathComponentCharacters = CharacterSet.urlPathAllowed
     allowedPathComponentCharacters.remove(charactersIn: "/")
     let encodedSandboxID = podSandboxID.addingPercentEncoding(withAllowedCharacters: allowedPathComponentCharacters) ?? podSandboxID
     let encodedPorts = Array(Set(ports)).sorted().map(String.init).joined(separator: ",")
-    return "krust-cri://portforward/\(encodedSandboxID)?ports=\(encodedPorts)"
+    let encodedTarget = targetHost.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? targetHost
+    let base = normalizedPortForwardStreamBaseURL(streamBaseURL)
+    return "\(base)/portforward/\(encodedSandboxID)?ports=\(encodedPorts)&target=\(encodedTarget)"
+}
+
+private func normalizedPortForwardStreamBaseURL(_ value: String) -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "krust-cri:/" }
+    return String(trimmed.dropLast(trimmed.hasSuffix("/") ? 1 : 0))
 }
 
 func resolvedPortForwardPorts(requestedPorts: [Int32], sandbox: SandboxRecord) -> [Int32] {

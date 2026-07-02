@@ -34,6 +34,9 @@ struct KrustCRICommand: AsyncParsableCommand {
     @Option(help: "Host directory used when kubelet requests container logs under /var/log/pods.")
     var hostPodLogsDir: String = "/tmp/krust-cri-pod-logs"
 
+    @Option(help: "Base URL for the SPDY/WebSocket port-forward streaming bridge.")
+    var portForwardStreamBaseURL: String = ""
+
     @Option(help: "Linux kernel path for the containerization backend.")
     var kernel: String?
 
@@ -85,6 +88,7 @@ struct KrustCRICommand: AsyncParsableCommand {
             backendName: backend,
             cgroupDriver: runtimeCgroupDriver,
             hostPodLogsDir: hostPodLogsDir,
+            portForwardStreamBaseURL: portForwardStreamBaseURL,
             logger: logger
         )
         let imageService = CRIImageService(state: state, backendName: backend, logger: logger)
