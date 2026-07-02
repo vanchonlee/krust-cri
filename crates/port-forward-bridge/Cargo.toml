@@ -1,0 +1,12 @@
+[package]
+name = "krust-port-forward-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "krust-port-forward-bridge"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
