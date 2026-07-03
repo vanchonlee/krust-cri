@@ -3,54 +3,66 @@
 `krust-cri` is an experimental Kubernetes Container Runtime Interface (CRI)
 runtime for macOS.
 
-<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/5e74f843-45fb-48f1-9573-d72f3db0cacb" />
+```mermaid
+flowchart LR
+    subgraph Traditional["Typical macOS Kubernetes"]
+        HostA["macOS host"] --> VMA["Linux VM"]
+        VMA --> RuntimeA["kubelet + containerd"]
+        RuntimeA --> PodA1["pod"]
+        RuntimeA --> PodA2["pod"]
+        RuntimeA --> PodA3["pod"]
+    end
 
-It exposes the official Kubernetes `runtime.v1` CRI API over a Unix socket and
-runs Linux workloads through Apple's open-source
-[Containerization](https://github.com/apple/containerization) package and
-`Virtualization.framework`.
+    subgraph Krust["krust-cri"]
+        HostB["macOS host"] --> CRI["krust-cri CRI socket"]
+        CRI --> PodB1["pod A = Linux VM"]
+        CRI --> PodB2["pod B = Linux VM"]
+        CRI --> PodB3["pod C = Linux VM"]
+    end
+```
 
-The important distinction: tools like Lima, Colima, and Docker Desktop give you
-a Linux machine or a Linux container engine on macOS. `krust-cri` is testing a
-different boundary. It asks whether kubelet can talk directly to a macOS-hosted
-CRI runtime, with that runtime driving Apple Containerization underneath.
+It exposes Kubernetes `runtime.v1` over a Unix socket and uses Apple's
+open-source [Containerization](https://github.com/apple/containerization)
+package plus `Virtualization.framework` to run Linux workloads.
 
-The current demo path is intentionally simple:
+Most macOS Kubernetes setups run a Linux VM first, then run pods inside that VM:
+
+```text
+macOS host
+  -> Linux VM
+     -> kubelet/containerd
+        -> pod
+        -> pod
+        -> pod
+```
+
+`krust-cri` moves the CRI runtime boundary onto macOS. Kubelet talks to
+`krust-cri` on the host, and each Kubernetes PodSandbox becomes its own Apple
+Containerization Linux VM:
 
 ```text
 macOS host
   -> krust-cri CRI socket
-  -> Apple Containerization backend
-  -> k3s/kubelet creates pods
-  -> kubectl verifies workload behavior
+     -> pod A = Linux VM
+     -> pod B = Linux VM
+     -> pod C = Linux VM
+```
+
+This is the main idea of the project: not "one Linux VM that contains the
+cluster", but "macOS hosts the CRI runtime, and pods are backed by lightweight
+Linux VMs".
+
+The current demo still runs k3s/kubelet in a LinuxPod so kubelet itself has a
+Linux userspace, but workload pods are created by the macOS-hosted CRI runtime:
+
+```text
+k3s/kubelet LinuxPod
+  -> host CRI socket relay
+  -> krust-cri on macOS
+  -> one Linux VM per pod
 ```
 
 This is a proof of concept, not a production Kubernetes runtime.
-
-What Kubernetes sees:
-
-```text
-NAME          STATUS   ROLES    AGE   VERSION        INTERNAL-IP    EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION   CONTAINER-RUNTIME
-krust-macos   Ready    <none>   0s    v1.35.0+k3s1   192.168.65.2   <none>        Debian GNU/Linux 12 (bookworm)   6.12.28          krust-cri://0.1.0-mvp
-```
-
-## How It Differs From Lima
-
-Lima launches Linux virtual machines. You can run containerd, Docker, k3s, or
-other Linux software inside those VMs.
-
-`krust-cri` is not a VM manager and does not try to replace Lima. Its focus is
-the Kubernetes runtime contract:
-
-```text
-kubelet
-  -> CRI runtime.v1 socket
-  -> krust-cri on macOS
-  -> Apple Containerization / LinuxPod
-```
-
-That means the interesting part of this project is not "can macOS run a Linux
-VM?" It is "can macOS host the CRI runtime that kubelet expects?"
 
 ## Current Status
 
@@ -74,14 +86,16 @@ Verified on the local development path:
   Containerization `LinuxPod` resolv.conf setup.
 - CRI sandbox port mappings are persisted and exposed in verbose sandbox status
   metadata for future host-port relay work.
-- CRI `PortForward` validates sandbox requests and returns a deterministic
-  streaming endpoint URL for future relay implementation.
+- CRI `PortForward` returns a streaming URL backed by the Rust
+  `krust-port-forward-bridge` sidecar.
+- `crictl port-forward` works against a real `nginx:alpine` container through
+  the Rust SPDY bridge.
 
 Still missing or incomplete:
 
 - Kubernetes DNS/service-name resolution and service networking.
-- Port-forward stream handling, host-port forwarding/relay, and multi-node pod
-  routing.
+- Automatic bridge sidecar startup from `krust-cri`.
+- Host-port forwarding/relay and multi-node pod routing.
 - Broader resource accounting beyond container and pod sandbox CPU/memory.
 - Multi-container/sidecar restart hardening.
 - Daemon restart recovery, orphan cleanup, GC, volumes, security context, and
@@ -185,6 +199,19 @@ Scripts/sign-krust-cri.sh
   --containerization-root "$HOME/Library/Application Support/com.apple.containerization"
 ```
 
+Port-forward bridge sidecar:
+
+```bash
+cargo run --manifest-path crates/port-forward-bridge/Cargo.toml -- \
+  --listen 127.0.0.1:10443
+```
+
+Run `krust-cri` with:
+
+```bash
+--port-forward-stream-base-url http://127.0.0.1:10443
+```
+
 Then point `crictl` at the socket:
 
 ```bash
@@ -210,6 +237,7 @@ people evaluating the project.
 - `Sources/KrustCRI`: CRI server, runtime state, image service, and backends.
 - `Sources/KrustKubeletPod`: helper for running kubelet/k3s inside an Apple
   `LinuxPod`.
+- `crates/port-forward-bridge`: Rust SPDY port-forward bridge sidecar.
 - `Protos/runtime/v1`: Kubernetes CRI protobuf definitions.
 - `Scripts`: build, signing, and smoke-test helpers.
 - `containerization`: Apple Containerization checkout/submodule.
@@ -220,7 +248,8 @@ The next valuable milestones are:
 
 - make DNS work for normal k3s pods,
 - add a minimal service-networking story,
-- implement port mappings,
+- auto-start and supervise the port-forward bridge,
+- implement host-port relay from CRI port mappings,
 - broaden stats and pod sandbox stats,
 - harden multi-container restart behavior,
 - package signing/setup into a repeatable open-source developer flow.
