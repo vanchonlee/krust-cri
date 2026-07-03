@@ -64,43 +64,57 @@ k3s/kubelet LinuxPod
 
 This is a proof of concept, not a production Kubernetes runtime.
 
-## Current Status
+## Feature Overview
 
-Verified on the local development path:
+The tables below show the current proof-of-concept surface. `Implemented` means
+the feature is covered by local smoke tests or focused tests. `Partial` means
+the API path exists, but important runtime behavior is still missing.
 
-- `krust-cri` starts a CRI `runtime.v1` Unix socket on macOS.
-- `crictl`, kubelet, and k3s can talk to that socket.
-- A Linux arm64 k3s server can run inside an Apple `LinuxPod`.
-- k3s registers a node with `CONTAINER-RUNTIME=krust-cri://0.1.0-mvp`.
-- `kubectl apply` can create workload pods through kubelet and `krust-cri`.
-- Same-node pod-to-pod TCP works through Apple `VmnetNetwork` pod IPs.
-- CRI logs work, including `ReopenContainerLog` for live log rotation.
-- Container exit status is visible to kubelet, including non-zero exit codes.
-- Basic `restartPolicy: OnFailure` reaches `CrashLoopBackOff` instead of
-  runtime create/start errors.
-- Live Apple backend `ContainerStats` returns CPU and memory usage from
-  `LinuxPod.statistics`.
-- Pod sandbox stats aggregate per-container CPU and memory usage for CRI
-  `PodSandboxStats`, `ListPodSandboxStats`, and `StreamPodSandboxStats`.
-- CRI sandbox DNS config is persisted and passed through to Apple
-  Containerization `LinuxPod` resolv.conf setup.
-- CRI sandbox port mappings are persisted and exposed in verbose sandbox status
-  metadata for future host-port relay work.
-- CRI `PortForward` returns a streaming URL backed by the Rust
-  `krust-port-forward-bridge` sidecar.
-- `crictl port-forward` works against a real `nginx:alpine` container through
-  the Rust SPDY bridge.
+### Node and CRI
 
-Still missing or incomplete:
+| Feature | Status | Notes |
+| --- | --- | --- |
+| CRI `runtime.v1` Unix socket | Implemented | `krust-cri` listens on macOS and serves kubelet/crictl. |
+| kubelet/crictl connectivity | Implemented | `crictl`, kubelet, and k3s can talk to the socket. |
+| k3s demo node registration | Implemented | k3s reports `CONTAINER-RUNTIME=krust-cri://0.1.0-mvp`. |
+| macOS-hosted runtime boundary | Implemented | kubelet reaches the host CRI socket through the current relay path. |
+| Release packaging/signing | Partial | Local smoke flows work; repeatable open-source packaging is not done. |
 
-- Kubernetes DNS/service-name resolution and service networking.
-- Automatic bridge sidecar startup from `krust-cri`.
-- Host-port forwarding/relay and multi-node pod routing.
-- Broader resource accounting beyond container and pod sandbox CPU/memory.
-- Multi-container/sidecar restart hardening.
-- Daemon restart recovery, orphan cleanup, GC, volumes, security context, and
-  RuntimeClass behavior.
-- Release packaging/signing beyond the local `/private/tmp` smoke path.
+### Pod Sandbox
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Create workload pods | Implemented | `kubectl apply` can create pods through kubelet and `krust-cri`. |
+| PodSandbox as Linux VM | Implemented | Each sandbox is backed by an Apple Containerization `LinuxPod`. |
+| Same-node pod-to-pod TCP | Implemented | Verified through Apple `VmnetNetwork` pod IPs. |
+| Sandbox DNS config | Partial | CRI DNS config is persisted and passed into `resolv.conf`; Kubernetes service-name DNS is not complete. |
+| Sandbox port mappings | Partial | CRI port mappings are persisted and exposed in verbose status; host-port relay is not implemented. |
+| Daemon restart recovery and GC | Not yet | Orphan cleanup and full recovery are still missing. |
+| Volumes and RuntimeClass | Not yet | Volume handling, security context, and RuntimeClass behavior are not implemented. |
+
+### Containers
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Container logs | Implemented | CRI logs work, including `ReopenContainerLog` for live log rotation. |
+| Exit status | Implemented | kubelet can see normal and non-zero container exit codes. |
+| `restartPolicy: OnFailure` | Partial | Basic failure/restart behavior reaches `CrashLoopBackOff`; hardening remains. |
+| Container stats | Implemented | Apple backend reports CPU and memory through `LinuxPod.statistics`. |
+| Pod sandbox stats | Implemented | Aggregates per-container CPU/memory for `PodSandboxStats`, `ListPodSandboxStats`, and `StreamPodSandboxStats`. |
+| Multi-container and sidecars | Partial | Basic paths exist, but restart behavior still needs hardening. |
+| Exec and attach | Not yet | Not part of the current verified surface. |
+
+### Networking and Ports
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Pod IP networking | Implemented | Pods receive Apple `VmnetNetwork` addresses in the demo path. |
+| CRI `PortForward` | Implemented | Returns a stream URL backed by the Rust `krust-port-forward-bridge` sidecar. |
+| Real `crictl port-forward` | Implemented | Verified against a real `nginx:alpine` container through the Rust SPDY bridge. |
+| Bridge sidecar supervision | Partial | The bridge works when started manually; `krust-cri` does not auto-start it yet. |
+| Kubernetes service networking | Not yet | ClusterIP/service routing is not implemented. |
+| Host-port relay | Not yet | Port mappings are stored, but host listening/forwarding is not wired. |
+| Multi-node pod routing | Not yet | Current smoke coverage is single-node only. |
 
 ## Demo With k3s
 
